@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5"
 
+	"workflow-code-test/api/services/nodes"
 	"workflow-code-test/api/services/storage"
 )
 
@@ -37,7 +38,7 @@ func newTestRouter(svc *Service) *mux.Router {
 }
 
 func TestNewService_NilStore(t *testing.T) {
-	_, err := NewService(nil)
+	_, err := NewService(nil, nodes.Deps{})
 	if err == nil {
 		t.Error("expected error for nil store, got nil")
 	}
@@ -128,7 +129,7 @@ func TestHandleGetWorkflow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := NewService(tt.store)
+			svc, err := NewService(tt.store, nodes.Deps{})
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
 			}
@@ -260,7 +261,7 @@ func TestHandleExecuteWorkflow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, err := NewService(tt.store)
+			svc, err := NewService(tt.store, nodes.Deps{})
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
 			}

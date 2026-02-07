@@ -4,16 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"strings"
+
+	"workflow-code-test/api/pkg/clients/weather"
 )
 
 // IntegrationNode calls an external API based on its metadata configuration.
 // Raw metadata is preserved for ToJSON(); parsed fields are used by Execute().
 type IntegrationNode struct {
-	base BaseFields
+	base    BaseFields
+	weather weather.Client
 
 	// Parsed from metadata for execution
 	APIEndpoint     string       `json:"apiEndpoint"`
@@ -31,8 +32,8 @@ type CityOption struct {
 // NewIntegrationNode constructs itself from the database fields.
 // Metadata is parsed into typed fields for Execute(), while the raw
 // bytes are kept on base for lossless ToJSON() passthrough.
-func NewIntegrationNode(base BaseFields) (*IntegrationNode, error) {
-	n := &IntegrationNode{base: base}
+func NewIntegrationNode(base BaseFields, weatherClient weather.Client) (*IntegrationNode, error) {
+	n := &IntegrationNode{base: base, weather: weatherClient}
 	if err := json.Unmarshal(base.Metadata, n); err != nil {
 		return nil, fmt.Errorf("invalid integration metadata: %w", err)
 	}
@@ -55,7 +56,7 @@ func (n *IntegrationNode) ToJSON() NodeJSON {
 }
 
 // Execute resolves the city from context, looks up coordinates,
-// and calls the weather API to fetch the current temperature.
+// and calls the weather client to fetch the current temperature.
 func (n *IntegrationNode) Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error) {
 	city, ok := nCtx.Variables["city"].(string)
 	if !ok {
@@ -73,44 +74,14 @@ func (n *IntegrationNode) Execute(ctx context.Context, nCtx *NodeContext) (*Exec
 		return nil, fmt.Errorf("unsupported city: %s", city)
 	}
 
-	url := fmt.Sprintf(
-		"https://api.open-meteo.com/v1/forecast?latitude=%f&longitude=%f&current_weather=true",
-		opt.Lat, opt.Lon,
-	)
+	slog.Info("fetching weather", "city", city, "lat", opt.Lat, "lon", opt.Lon)
 
-	slog.Info("calling weather API", "city", city, "url", url)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	temp, err := n.weather.GetTemperature(ctx, opt.Lat, opt.Lon)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("weather lookup failed: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("weather API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("weather API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var weather struct {
-		CurrentWeather struct {
-			Temperature float64 `json:"temperature"`
-		} `json:"current_weather"`
-	}
-	if err := json.Unmarshal(body, &weather); err != nil {
-		return nil, fmt.Errorf("failed to parse weather response: %w", err)
-	}
-
-	temp := weather.CurrentWeather.Temperature
-	slog.Info("weather API result", "city", city, "temperature", temp)
+	slog.Info("weather result", "city", city, "temperature", temp)
 
 	return &ExecutionResult{
 		Status: "completed",

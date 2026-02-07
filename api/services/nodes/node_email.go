@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
+
+	"workflow-code-test/api/pkg/clients/email"
 )
 
-// EmailNode composes and "sends" an email using a template from metadata.
+// EmailNode composes and sends an email using a template from metadata.
 // Variable placeholders like {{city}} in the template are resolved from
-// the runtime context. Actual sending is simulated for this challenge.
+// the runtime context. The actual send is delegated to the email client.
 type EmailNode struct {
-	base BaseFields
+	base  BaseFields
+	email email.Client
 
 	InputVariables  []string      `json:"inputVariables"`
 	OutputVariables []string      `json:"outputVariables"`
@@ -24,8 +26,8 @@ type EmailTemplate struct {
 	Body    string `json:"body"`
 }
 
-func NewEmailNode(base BaseFields) (*EmailNode, error) {
-	n := &EmailNode{base: base}
+func NewEmailNode(base BaseFields, emailClient email.Client) (*EmailNode, error) {
+	n := &EmailNode{base: base, email: emailClient}
 	if err := json.Unmarshal(base.Metadata, n); err != nil {
 		return nil, fmt.Errorf("invalid email metadata: %w", err)
 	}
@@ -46,26 +48,35 @@ func (n *EmailNode) ToJSON() NodeJSON {
 }
 
 // Execute resolves template placeholders from context variables and
-// simulates sending the email. Returns the composed email as output.
-func (n *EmailNode) Execute(_ context.Context, nCtx *NodeContext) (*ExecutionResult, error) {
+// sends the email via the client. Returns the composed email as output.
+func (n *EmailNode) Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error) {
 	subject := resolveTemplate(n.EmailTemplate.Subject, nCtx.Variables)
 	body := resolveTemplate(n.EmailTemplate.Body, nCtx.Variables)
+	to, _ := nCtx.Variables["email"].(string)
 
-	email, _ := nCtx.Variables["email"].(string)
+	msg := email.Message{
+		To:      to,
+		From:    "weather-alerts@example.com",
+		Subject: subject,
+		Body:    body,
+	}
 
-	slog.Info("sending email", "to", email, "subject", subject)
+	result, err := n.email.Send(ctx, msg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send email: %w", err)
+	}
 
 	return &ExecutionResult{
 		Status: "completed",
 		Output: map[string]any{
 			"emailDraft": map[string]any{
-				"to":      email,
-				"from":    "weather-alerts@example.com",
-				"subject": subject,
-				"body":    body,
+				"to":      msg.To,
+				"from":    msg.From,
+				"subject": msg.Subject,
+				"body":    msg.Body,
 			},
-			"deliveryStatus": "sent",
-			"emailSent":      true,
+			"deliveryStatus": result.DeliveryStatus,
+			"emailSent":      result.Sent,
 		},
 	}, nil
 }

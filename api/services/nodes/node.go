@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"workflow-code-test/api/pkg/clients/email"
+	"workflow-code-test/api/pkg/clients/weather"
 )
 
 // NodeContext carries runtime variables between nodes during execution.
@@ -63,21 +66,28 @@ type Node interface {
 	Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error)
 }
 
+// Deps holds external clients that nodes may need during execution.
+// Passed into the factory so nodes stay decoupled from concrete implementations.
+type Deps struct {
+	Weather weather.Client
+	Email   email.Client
+}
+
 // New constructs the appropriate node type from its database fields.
 // Adding a new node type (e.g., SMS) means adding a case here
 // and a new file implementing the Node interface.
-func New(base BaseFields) (Node, error) {
+func New(base BaseFields, deps Deps) (Node, error) {
 	switch base.NodeType {
 	case "start", "end":
 		return NewPassthroughNode(base), nil
 	case "form":
 		return NewFormNode(base)
 	case "integration":
-		return NewIntegrationNode(base)
+		return NewIntegrationNode(base, deps.Weather)
 	case "condition":
 		return NewConditionNode(base)
 	case "email":
-		return NewEmailNode(base)
+		return NewEmailNode(base, deps.Email)
 	default:
 		return nil, fmt.Errorf("unknown node type: %s", base.NodeType)
 	}

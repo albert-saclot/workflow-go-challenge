@@ -12,7 +12,10 @@ import (
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 
+	"workflow-code-test/api/pkg/clients/email"
+	"workflow-code-test/api/pkg/clients/weather"
 	"workflow-code-test/api/pkg/db"
+	"workflow-code-test/api/services/nodes"
 	"workflow-code-test/api/services/storage"
 	"workflow-code-test/api/services/workflow"
 )
@@ -48,7 +51,11 @@ func main() {
 		return
 	}
 
-	workflowService, err := workflow.NewService(pgStore)
+	weatherClient := weather.NewOpenMeteoClient(nil)
+	emailClient := email.NewStubClient("weather-alerts@example.com")
+	deps := nodes.Deps{Weather: weatherClient, Email: emailClient}
+
+	workflowService, err := workflow.NewService(pgStore, deps)
 	if err != nil {
 		slog.Error("Failed to create workflow service", "error", err)
 		return

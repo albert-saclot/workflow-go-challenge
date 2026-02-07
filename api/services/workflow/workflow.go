@@ -98,7 +98,7 @@ func (s *Service) HandleExecuteWorkflow(w http.ResponseWriter, r *http.Request) 
 	}
 
 	executedAt := time.Now().Format(time.RFC3339)
-	result, err := executeWorkflow(ctx, wf, inputs)
+	result, err := executeWorkflow(ctx, wf, inputs, s.deps)
 	if err != nil {
 		slog.Error("workflow execution failed", "error", err)
 		http.Error(w, fmt.Sprintf("execution failed: %s", err.Error()), http.StatusInternalServerError)

@@ -34,7 +34,7 @@ type edgeTarget struct {
 
 // executeWorkflow walks the workflow graph from the start node, executing
 // each node in sequence and following edges (including condition branches).
-func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[string]any) (*ExecutionResponse, error) {
+func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[string]any, deps nodes.Deps) (*ExecutionResponse, error) {
 	// 1. Construct typed nodes from storage data
 	nodeMap := make(map[string]nodes.Node)
 	nodeInfo := make(map[string]storage.Node) // keep storage info for step results
@@ -49,7 +49,7 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 			Metadata:    sn.Data.Metadata,
 		}
 
-		n, err := nodes.New(base)
+		n, err := nodes.New(base, deps)
 		if err != nil {
 			return nil, fmt.Errorf("failed to construct node %q: %w", sn.ID, err)
 		}

@@ -3,6 +3,7 @@ package workflow
 import (
 	"fmt"
 	"net/http"
+	"workflow-code-test/api/services/nodes"
 	"workflow-code-test/api/services/storage"
 
 	"github.com/gorilla/mux"
@@ -13,14 +14,16 @@ import (
 // keeping the HTTP layer decoupled from persistence.
 type Service struct {
 	storage storage.Storage
+	deps    nodes.Deps
 }
 
-// NewService creates a workflow Service with the given storage backend.
-func NewService(store storage.Storage) (*Service, error) {
+// NewService creates a workflow Service with the given storage backend
+// and external client dependencies used during workflow execution.
+func NewService(store storage.Storage, deps nodes.Deps) (*Service, error) {
 	if store == nil {
 		return nil, fmt.Errorf("service: store cannot be nil")
 	}
-	return &Service{storage: store}, nil
+	return &Service{storage: store, deps: deps}, nil
 }
 
 // jsonMiddleware sets the Content-Type header to application/json
