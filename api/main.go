@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"workflow-code-test/api/pkg/db"
+	"workflow-code-test/api/services/storage"
 	"workflow-code-test/api/services/workflow"
 )
 
@@ -41,7 +42,13 @@ func main() {
 
 	apiRouter := mainRouter.PathPrefix("/api/v1").Subrouter()
 
-	workflowService, err := workflow.NewService(pool)
+	pgStore, err := storage.NewInstance(pool)
+	if err != nil {
+		slog.Error("Failed to create store instance", "error", err)
+		return
+	}
+
+	workflowService, err := workflow.NewService(pgStore)
 	if err != nil {
 		slog.Error("Failed to create workflow service", "error", err)
 		return

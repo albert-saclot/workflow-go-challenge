@@ -1,18 +1,26 @@
 package workflow
 
 import (
+	"fmt"
 	"net/http"
+	"workflow-code-test/api/services/storage"
 
 	"github.com/gorilla/mux"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Service handles HTTP requests for workflow operations.
+// It depends on the Storage interface rather than a concrete implementation,
+// keeping the HTTP layer decoupled from persistence.
 type Service struct {
-	db *pgxpool.Pool
+	storage storage.Storage
 }
 
-func NewService(pool *pgxpool.Pool) (*Service, error) {
-	return &Service{db: pool}, nil
+// NewService creates a workflow Service with the given storage backend.
+func NewService(store storage.Storage) (*Service, error) {
+	if store == nil {
+		return nil, fmt.Errorf("service: store cannot be nil")
+	}
+	return &Service{storage: store}, nil
 }
 
 // jsonMiddleware sets the Content-Type header to application/json
