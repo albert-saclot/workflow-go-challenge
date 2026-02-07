@@ -13,6 +13,7 @@ type ConditionNode struct {
 	base BaseFields
 
 	ConditionExpression string   `json:"conditionExpression"`
+	ConditionVariable   string   `json:"conditionVariable"`
 	OutputVariables     []string `json:"outputVariables"`
 }
 
@@ -38,12 +39,17 @@ func (n *ConditionNode) ToJSON() NodeJSON {
 }
 
 // Execute evaluates the condition using operator and threshold from context.
-// The expression "temperature {{operator}} {{threshold}}" is resolved by
-// reading the actual temperature, operator, and threshold from variables.
+// The variable to compare is read from conditionVariable in metadata,
+// defaulting to "temperature" for backward compatibility.
 func (n *ConditionNode) Execute(_ context.Context, nCtx *NodeContext) (*ExecutionResult, error) {
-	temperature, ok := toFloat64(nCtx.Variables["temperature"])
+	varName := n.ConditionVariable
+	if varName == "" {
+		varName = "temperature"
+	}
+
+	value, ok := toFloat64(nCtx.Variables[varName])
 	if !ok {
-		return nil, fmt.Errorf("missing or invalid variable: temperature")
+		return nil, fmt.Errorf("missing or invalid variable: %s", varName)
 	}
 
 	operator, _ := nCtx.Variables["operator"].(string)
@@ -56,7 +62,7 @@ func (n *ConditionNode) Execute(_ context.Context, nCtx *NodeContext) (*Executio
 		threshold = 25 // default
 	}
 
-	conditionMet, err := evaluate(temperature, operator, threshold)
+	conditionMet, err := evaluate(value, operator, threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -73,10 +79,10 @@ func (n *ConditionNode) Execute(_ context.Context, nCtx *NodeContext) (*Executio
 			"conditionMet": conditionMet,
 			"threshold":    threshold,
 			"operator":     operator,
-			"actualValue":  temperature,
+			"actualValue":  value,
 			"message": fmt.Sprintf(
-				"Temperature %.1f°C is %s %.1f°C - condition %s",
-				temperature, operator, threshold, branchLabel(conditionMet),
+				"%s %.1f is %s %.1f - condition %s",
+				varName, value, operator, threshold, branchLabel(conditionMet),
 			),
 		},
 	}, nil
