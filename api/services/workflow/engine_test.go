@@ -73,7 +73,7 @@ func TestExecuteWorkflow(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name: "cycle detection",
+			name: "cycle detected before execution",
 			nodes: []storage.Node{
 				node("start", "start"),
 				node("a", "start"), // using start type since it's a passthrough
@@ -84,10 +84,8 @@ func TestExecuteWorkflow(t *testing.T) {
 				edge("e2", "a", "b", nil),
 				edge("e3", "b", "a", nil), // cycle: b → a
 			},
-			inputs:     map[string]any{},
-			wantStatus: "failed",
-			wantSteps:  3, // start, a, b — then cycle detected at a
-			wantFailed: "a",
+			inputs:    map[string]any{},
+			wantError: true, // DAG validation catches this before any nodes execute
 		},
 		{
 			name: "node failure returns partial results",

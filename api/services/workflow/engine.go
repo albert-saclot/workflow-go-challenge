@@ -29,6 +29,7 @@ type StepResult struct {
 	Label       string         `json:"label"`
 	Description string         `json:"description"`
 	Status      string         `json:"status"`
+	DurationMs  int64          `json:"durationMs"`
 	Output      map[string]any `json:"output,omitempty"`
 	Error       string         `json:"error,omitempty"`
 }
@@ -91,16 +92,12 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 		})
 	}
 
-	// 3. Find the start node
-	var startID string
-	for _, sn := range wf.Nodes {
-		if sn.Type == "start" {
-			startID = sn.ID
-			break
-		}
-	}
-	if startID == "" {
-		return nil, fmt.Errorf("workflow has no start node")
+	// 3. Validate the graph structure before executing any nodes.
+	// This catches cycles and missing start nodes upfront, avoiding
+	// wasted API calls on malformed workflows.
+	startID, err := validateDAG(wf.Nodes, adjacency)
+	if err != nil {
+		return nil, err
 	}
 
 	// 4. Walk the graph, executing each node
@@ -110,7 +107,6 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 	}
 
 	var steps []StepResult
-	visited := make(map[string]bool)
 	currentID := startID
 
 	for currentID != "" {
@@ -123,17 +119,6 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 				Error:      fmt.Sprintf("execution cancelled: %s", err.Error()),
 			}, nil
 		}
-
-		// Detect cycles — a node should never be visited twice
-		if visited[currentID] {
-			return &ExecutionResponse{
-				Status:     "failed",
-				Steps:      steps,
-				FailedNode: currentID,
-				Error:      fmt.Sprintf("cycle detected at node %q", currentID),
-			}, nil
-		}
-		visited[currentID] = true
 
 		// Guard against runaway workflows
 		if len(steps) >= maxExecutionSteps {
@@ -156,9 +141,12 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 		}
 		info := nodeInfo[currentID]
 
+		start := time.Now()
 		nodeCtx, cancel := context.WithTimeout(ctx, nodeTimeout)
 		result, err := node.Execute(nodeCtx, nCtx)
 		cancel()
+		elapsed := time.Since(start).Milliseconds()
+
 		if err != nil {
 			// Append the failed step with error details, then return partial results
 			steps = append(steps, StepResult{
@@ -167,6 +155,7 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 				Label:       info.Data.Label,
 				Description: info.Data.Description,
 				Status:      "error",
+				DurationMs:  elapsed,
 				Error:       err.Error(),
 			})
 			return &ExecutionResponse{
@@ -188,6 +177,7 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 			Label:       info.Data.Label,
 			Description: info.Data.Description,
 			Status:      result.Status,
+			DurationMs:  elapsed,
 			Output:      result.Output,
 		})
 
@@ -199,6 +189,51 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 		Status: "completed",
 		Steps:  steps,
 	}, nil
+}
+
+// validateDAG checks that the workflow graph is a valid DAG before execution.
+// Returns the start node ID, or an error if the graph has no start node or
+// contains cycles. Uses DFS with three-color marking (unvisited/visiting/done).
+func validateDAG(storageNodes []storage.Node, adjacency map[string][]edgeTarget) (string, error) {
+	var startID string
+	for _, n := range storageNodes {
+		if n.Type == "start" {
+			startID = n.ID
+			break
+		}
+	}
+	if startID == "" {
+		return "", fmt.Errorf("workflow has no start node")
+	}
+
+	const (
+		unvisited = 0
+		visiting  = 1
+		done      = 2
+	)
+	state := make(map[string]int)
+
+	var dfs func(string) error
+	dfs = func(id string) error {
+		state[id] = visiting
+		for _, e := range adjacency[id] {
+			switch state[e.targetID] {
+			case visiting:
+				return fmt.Errorf("cycle detected at node %q", e.targetID)
+			case unvisited:
+				if err := dfs(e.targetID); err != nil {
+					return err
+				}
+			}
+		}
+		state[id] = done
+		return nil
+	}
+
+	if err := dfs(startID); err != nil {
+		return "", err
+	}
+	return startID, nil
 }
 
 // nextNode picks the next node based on outgoing edges and an optional branch.
