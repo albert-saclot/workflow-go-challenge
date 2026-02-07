@@ -3,9 +3,20 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"workflow-code-test/api/services/nodes"
 	"workflow-code-test/api/services/storage"
+)
+
+const (
+	// maxExecutionSteps is a safeguard against malformed workflows.
+	maxExecutionSteps = 100
+
+	// nodeTimeout limits how long a single node can execute.
+	// Prevents slow external API calls from blocking the entire workflow.
+	// TODO: consider per-node-type timeouts and retry with backoff for 429s.
+	nodeTimeout = 10 * time.Second
 )
 
 // StepResult captures the outcome of executing a single node.
@@ -16,13 +27,19 @@ type StepResult struct {
 	Description string         `json:"description"`
 	Status      string         `json:"status"`
 	Output      map[string]any `json:"output,omitempty"`
+	Error       string         `json:"error,omitempty"`
 }
 
 // ExecutionResponse is the JSON response for the execute endpoint.
+// On failure, Status is "failed", FailedNode identifies which node
+// broke, and Steps contains partial results up to and including the
+// failed node.
 type ExecutionResponse struct {
 	ExecutedAt string       `json:"executedAt"`
 	Status     string       `json:"status"`
 	Steps      []StepResult `json:"steps"`
+	FailedNode string       `json:"failedNode,omitempty"`
+	Error      string       `json:"error,omitempty"`
 }
 
 // edgeTarget represents a single outgoing edge from a node.
@@ -34,6 +51,7 @@ type edgeTarget struct {
 
 // executeWorkflow walks the workflow graph from the start node, executing
 // each node in sequence and following edges (including condition branches).
+// Returns partial results on failure so the caller can show which node broke.
 func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[string]any, deps nodes.Deps) (*ExecutionResponse, error) {
 	// 1. Construct typed nodes from storage data
 	nodeMap := make(map[string]nodes.Node)
@@ -86,18 +104,71 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 	}
 
 	var steps []StepResult
+	visited := make(map[string]bool)
 	currentID := startID
 
 	for currentID != "" {
+		// Check if the request context has been cancelled (client disconnect, timeout)
+		if err := ctx.Err(); err != nil {
+			return &ExecutionResponse{
+				Status:     "cancelled",
+				Steps:      steps,
+				FailedNode: currentID,
+				Error:      fmt.Sprintf("execution cancelled: %s", err.Error()),
+			}, nil
+		}
+
+		// Detect cycles — a node should never be visited twice
+		if visited[currentID] {
+			return &ExecutionResponse{
+				Status:     "failed",
+				Steps:      steps,
+				FailedNode: currentID,
+				Error:      fmt.Sprintf("cycle detected at node %q", currentID),
+			}, nil
+		}
+		visited[currentID] = true
+
+		// Guard against runaway workflows
+		if len(steps) >= maxExecutionSteps {
+			return &ExecutionResponse{
+				Status:     "failed",
+				Steps:      steps,
+				FailedNode: currentID,
+				Error:      "workflow exceeded maximum execution steps",
+			}, nil
+		}
+
 		node, ok := nodeMap[currentID]
 		if !ok {
-			return nil, fmt.Errorf("node %q not found in workflow", currentID)
+			return &ExecutionResponse{
+				Status:     "failed",
+				Steps:      steps,
+				FailedNode: currentID,
+				Error:      fmt.Sprintf("node %q not found in workflow", currentID),
+			}, nil
 		}
 		info := nodeInfo[currentID]
 
-		result, err := node.Execute(ctx, nCtx)
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeTimeout)
+		result, err := node.Execute(nodeCtx, nCtx)
+		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("node %q execution failed: %w", currentID, err)
+			// Append the failed step with error details, then return partial results
+			steps = append(steps, StepResult{
+				NodeID:      info.ID,
+				Type:        info.Type,
+				Label:       info.Data.Label,
+				Description: info.Data.Description,
+				Status:      "error",
+				Error:       err.Error(),
+			})
+			return &ExecutionResponse{
+				Status:     "failed",
+				Steps:      steps,
+				FailedNode: info.ID,
+				Error:      fmt.Sprintf("node %q failed: %s", info.ID, err.Error()),
+			}, nil
 		}
 
 		// Merge output variables into context for downstream nodes

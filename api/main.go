@@ -35,7 +35,8 @@ func main() {
 		return
 	}
 
-	pool, err := db.Connect(ctx, dbURL)
+	dbCfg := db.DefaultConfig(dbURL)
+	pool, err := db.Connect(ctx, dbCfg)
 	if err != nil {
 		slog.Error("Failed to connect to database", "error", err)
 		return

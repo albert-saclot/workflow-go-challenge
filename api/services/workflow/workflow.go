@@ -3,7 +3,6 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -47,11 +46,16 @@ func (s *Service) HandleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write(payload)
+	if _, err := w.Write(payload); err != nil {
+		slog.Error("failed to write response", "error", err)
+	}
 }
 
 // HandleExecuteWorkflow loads a workflow from the database, parses the input
 // variables from the request body, and executes the workflow graph end-to-end.
+// Execution failures (node errors, cycles) are returned as 200 with
+// status "failed" and partial results — they are business-level outcomes,
+// not server errors.
 func (s *Service) HandleExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	slog.Debug("handling workflow execution", "id", id)
@@ -100,11 +104,19 @@ func (s *Service) HandleExecuteWorkflow(w http.ResponseWriter, r *http.Request) 
 	executedAt := time.Now().Format(time.RFC3339)
 	result, err := executeWorkflow(ctx, wf, inputs, s.deps)
 	if err != nil {
+		// Hard errors (e.g. invalid node metadata) are server-level failures
 		slog.Error("workflow execution failed", "error", err)
-		http.Error(w, fmt.Sprintf("execution failed: %s", err.Error()), http.StatusInternalServerError)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	result.ExecutedAt = executedAt
+
+	if result.Status == "failed" {
+		slog.Warn("workflow completed with failure",
+			"failedNode", result.FailedNode,
+			"error", result.Error,
+		)
+	}
 
 	payload, err := json.Marshal(result)
 	if err != nil {
@@ -114,5 +126,7 @@ func (s *Service) HandleExecuteWorkflow(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write(payload)
+	if _, err := w.Write(payload); err != nil {
+		slog.Error("failed to write response", "error", err)
+	}
 }
