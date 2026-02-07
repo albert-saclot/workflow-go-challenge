@@ -50,91 +50,69 @@ func (s *Service) HandleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	w.Write(payload)
 }
 
-// TODO: Update this
+// HandleExecuteWorkflow loads a workflow from the database, parses the input
+// variables from the request body, and executes the workflow graph end-to-end.
 func (s *Service) HandleExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	slog.Debug("Handling workflow execution for id", "id", id)
+	slog.Debug("handling workflow execution", "id", id)
 
-	// Generate current timestamp
-	currentTime := time.Now().Format(time.RFC3339)
+	wfUUID, err := uuid.Parse(id)
+	if err != nil {
+		slog.Error("invalid workflow id provided", "error", err)
+		http.Error(w, "invalid workflow id", http.StatusBadRequest)
+		return
+	}
 
-	executionJSON := fmt.Sprintf(`{
-		"executedAt": "%s",
-		"status": "completed",
-		"steps": [
-			{
-				"nodeId": "start",
-				"type": "start",
-				"label": "Start",
-				"description": "Begin weather check workflow",
-				"status": "completed"
-			},
-			{
-				"nodeId": "form",
-				"type": "form",
-				"label": "User Input",
-				"description": "Process collected data - name, email, location",
-				"status": "completed",
-				"output": {
-					"name": "Alice",
-					"email": "alice@example.com",
-					"city": "Sydney"
-				}
-			},
-			{
-				"nodeId": "weather-api",
-				"type": "integration",
-				"label": "Weather API",
-				"description": "Fetch current temperature for Sydney",
-				"status": "completed",
-				"output": {
-					"temperature": 28.5,
-					"location": "Sydney"
-				}
-			},
-			{
-				"nodeId": "condition",
-				"type": "condition",
-				"label": "Check Condition",
-				"description": "Evaluate temperature threshold",
-				"status": "completed",
-				"output": {
-					"conditionMet": true,
-					"threshold": 25,
-					"operator": "greater_than",
-					"actualValue": 28.5,
-					"message": "Temperature 28.5°C is greater than 25°C - condition met"
-				}
-			},
-			{
-				"nodeId": "email",
-				"type": "email",
-				"label": "Send Alert",
-				"description": "Email weather alert notification",
-				"status": "completed",
-				"output": {
-					"emailDraft": {
-						"to": "alice@example.com",
-						"from": "weather-alerts@example.com",
-						"subject": "Weather Alert",
-						"body": "Weather alert for Sydney! Temperature is 28.5°C!",
-						"timestamp": "2024-01-15T14:30:24.856Z"
-					},
-					"deliveryStatus": "sent",
-					"messageId": "msg_abc123def456",
-					"emailSent": true
-				}
-			},
-			{
-				"nodeId": "end",
-				"type": "end",
-				"label": "Complete",
-				"description": "Workflow execution finished",
-				"status": "completed"
-			}
-		]
-	}`, currentTime)
+	// Parse the request body. The frontend sends:
+	//   { "formData": { "name": ..., "city": ... }, "condition": { "operator": ..., "threshold": ... } }
+	// We flatten both into a single variables map for the engine.
+	var body struct {
+		FormData  map[string]any `json:"formData"`
+		Condition map[string]any `json:"condition"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		slog.Error("failed to decode request body", "error", err)
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	inputs := make(map[string]any)
+	for k, v := range body.FormData {
+		inputs[k] = v
+	}
+	for k, v := range body.Condition {
+		inputs[k] = v
+	}
+
+	ctx := r.Context()
+	wf, err := s.storage.GetWorkflow(ctx, wfUUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("workflow not found", "id", wfUUID)
+			http.Error(w, "workflow not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to get workflow", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	executedAt := time.Now().Format(time.RFC3339)
+	result, err := executeWorkflow(ctx, wf, inputs)
+	if err != nil {
+		slog.Error("workflow execution failed", "error", err)
+		http.Error(w, fmt.Sprintf("execution failed: %s", err.Error()), http.StatusInternalServerError)
+		return
+	}
+	result.ExecutedAt = executedAt
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		slog.Error("failed to marshal execution result", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(executionJSON))
+	w.Write(payload)
 }
