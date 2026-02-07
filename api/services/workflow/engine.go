@@ -16,6 +16,10 @@ const (
 	// nodeTimeout limits how long a single node can execute.
 	// Prevents slow external API calls from blocking the entire workflow.
 	nodeTimeout = 10 * time.Second
+
+	// workflowTimeout bounds the total execution time across all nodes.
+	// Without this, a long chain of nodes could block the HTTP handler indefinitely.
+	workflowTimeout = 60 * time.Second
 )
 
 // StepResult captures the outcome of executing a single node.
@@ -52,6 +56,9 @@ type edgeTarget struct {
 // each node in sequence and following edges (including condition branches).
 // Returns partial results on failure so the caller can show which node broke.
 func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[string]any, deps nodes.Deps) (*ExecutionResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, workflowTimeout)
+	defer cancel()
+
 	// 1. Construct typed nodes from storage data
 	nodeMap := make(map[string]nodes.Node)
 	nodeInfo := make(map[string]storage.Node) // keep storage info for step results

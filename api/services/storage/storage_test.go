@@ -17,9 +17,14 @@ var (
 	testNow  = time.Now()
 )
 
-// setupSuccessMock configures all three queries (header, nodes, edges)
-// to return valid data matching the seeded Weather Check workflow.
+// setupSuccessMock configures the transaction and all three queries (header,
+// nodes, edges) to return valid data matching the seeded Weather Check workflow.
 func setupSuccessMock(mock pgxmock.PgxPoolIface) {
+	mock.ExpectBeginTx(pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+
 	mock.ExpectQuery("SELECT name, created_at, modified_at").
 		WithArgs(testWfID).
 		WillReturnRows(
@@ -47,6 +52,8 @@ func setupSuccessMock(mock pgxmock.PgxPoolIface) {
 				"edge_type", "animated", "label", "style_props", "label_style",
 			}).AddRow("e1", "start", "form", nil, "smoothstep", true, &edgeLabel, edgeStyle, nil),
 		)
+
+	mock.ExpectCommit()
 }
 
 func TestGetWorkflow(t *testing.T) {
@@ -107,15 +114,24 @@ func TestGetWorkflow(t *testing.T) {
 		{
 			name: "workflow not found returns ErrNoRows",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBeginTx(pgx.TxOptions{
+					IsoLevel:   pgx.RepeatableRead,
+					AccessMode: pgx.ReadOnly,
+				})
 				mock.ExpectQuery("SELECT name, created_at, modified_at").
 					WithArgs(testWfID).
 					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectRollback()
 			},
 			wantErr: pgx.ErrNoRows,
 		},
 		{
 			name: "node query failure propagates error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBeginTx(pgx.TxOptions{
+					IsoLevel:   pgx.RepeatableRead,
+					AccessMode: pgx.ReadOnly,
+				})
 				// Header succeeds
 				mock.ExpectQuery("SELECT name, created_at, modified_at").
 					WithArgs(testWfID).
@@ -127,12 +143,17 @@ func TestGetWorkflow(t *testing.T) {
 				mock.ExpectQuery("SELECT").
 					WithArgs(testWfID).
 					WillReturnError(errors.New("connection lost"))
+				mock.ExpectRollback()
 			},
 			wantErr: errors.New("connection lost"),
 		},
 		{
 			name: "edge query failure propagates error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBeginTx(pgx.TxOptions{
+					IsoLevel:   pgx.RepeatableRead,
+					AccessMode: pgx.ReadOnly,
+				})
 				// Header succeeds
 				mock.ExpectQuery("SELECT name, created_at, modified_at").
 					WithArgs(testWfID).
@@ -153,6 +174,7 @@ func TestGetWorkflow(t *testing.T) {
 				mock.ExpectQuery("SELECT edge_id").
 					WithArgs(testWfID).
 					WillReturnError(errors.New("timeout"))
+				mock.ExpectRollback()
 			},
 			wantErr: errors.New("timeout"),
 		},

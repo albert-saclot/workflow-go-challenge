@@ -15,6 +15,7 @@ import (
 type DB interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
 }
 
 // pgStorage implements the Storage interface using PostgreSQL.
@@ -48,6 +49,17 @@ func (r *pgStorage) GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, e
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	// Wrap all queries in a read-only transaction so the three SELECTs
+	// (header, nodes, edges) see a consistent snapshot of the database.
+	tx, err := r.db.BeginTx(timeoutCtx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(timeoutCtx)
+
 	wf := &Workflow{
 		ID:    id,
 		Nodes: []Node{},
@@ -55,7 +67,7 @@ func (r *pgStorage) GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, e
 	}
 
 	// 1. Fetch workflow header, respecting soft-deletion.
-	err := r.db.QueryRow(timeoutCtx, `
+	err = tx.QueryRow(timeoutCtx, `
         SELECT name, created_at, modified_at
         FROM workflows
         WHERE id = $1 AND deleted_at IS NULL`,
@@ -68,7 +80,7 @@ func (r *pgStorage) GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, e
 	// 2. Hydrate nodes by joining instance positions with library blueprints.
 	// Each node instance on the canvas references a node_library entry that holds
 	// the reusable logic (type, label, description, metadata).
-	nodeRows, err := r.db.Query(timeoutCtx, `
+	nodeRows, err := tx.Query(timeoutCtx, `
         SELECT
             i.instance_id,
             l.node_type,
@@ -106,7 +118,7 @@ func (r *pgStorage) GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, e
 
 	// 3. Fetch edges with their visual properties (animation, labels, styling).
 	// source_handle is used by condition nodes to distinguish true/false branches.
-	edgeRows, err := r.db.Query(timeoutCtx, `
+	edgeRows, err := tx.Query(timeoutCtx, `
         SELECT edge_id, source_instance_id, target_instance_id, source_handle,
                edge_type, animated, label, style_props, label_style
         FROM workflow_edges
@@ -139,5 +151,5 @@ func (r *pgStorage) GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, e
 		return nil, err
 	}
 
-	return wf, nil
+	return wf, tx.Commit(timeoutCtx)
 }
