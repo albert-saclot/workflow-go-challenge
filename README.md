@@ -226,3 +226,4 @@ All tests run in parallel (`t.Parallel()`) and use table-driven patterns. Storag
 - **Parallel branch execution** — When independent branches exist in the graph, execute them concurrently with `errgroup`.
 - **Node versioning** — Pin workflows to specific library node versions so updates don't silently change behaviour.
 - **Save-time validation** — Reject invalid graphs (cycles, disconnected nodes, missing edges) at save time rather than execution time.
+- **Workflow and Node Versioning** — Implement versioning for workflows and potentially individual node definitions. This would enable auditing, rollback, and address the "Global library mutation" issue (e.g., via content-addressable storage for node metadata). This is a significant enhancement and out-of-scope for the current submission.

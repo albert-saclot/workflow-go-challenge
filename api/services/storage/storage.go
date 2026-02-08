@@ -28,6 +28,7 @@ type pgStorage struct {
 // the persistence layer, making it testable and swappable.
 type Storage interface {
 	GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, error)
+	UpsertWorkflow(ctx context.Context, wf *Workflow) error
 }
 
 // NewInstance creates a new PostgreSQL-backed Storage implementation.
@@ -152,4 +153,109 @@ func (r *pgStorage) GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, e
 	}
 
 	return wf, tx.Commit(timeoutCtx)
+}
+
+func (r *pgStorage) UpsertWorkflow(ctx context.Context, wf *Workflow) error {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second) // Increased timeout for multiple operations
+	defer cancel()
+
+	tx, err := r.db.BeginTx(timeoutCtx, pgx.TxOptions{
+		IsoLevel: pgx.ReadCommitted, // ReadCommitted suitable for write transactions
+	})
+	if err != nil {
+		return fmt.Errorf("begin transaction for upsert: %w", err)
+	}
+	defer tx.Rollback(timeoutCtx) // Rollback on error or if not committed
+
+	now := time.Now()
+	if wf.CreatedAt.IsZero() {
+		wf.CreatedAt = now
+	}
+	wf.ModifiedAt = now
+
+	// 1. Upsert the main workflow entry
+	_, err = tx.Exec(timeoutCtx, `
+        INSERT INTO workflows (id, name, created_at, modified_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (id) DO UPDATE SET
+            name = EXCLUDED.name,
+            modified_at = EXCLUDED.modified_at,
+            deleted_at = NULL;`, // Ensure workflow is 'undeleted' if upserted
+		wf.ID, wf.Name, wf.CreatedAt, wf.ModifiedAt)
+	if err != nil {
+		return fmt.Errorf("upsert workflow header: %w", err)
+	}
+
+	// 2. Delete existing workflow_node_instances for this workflow
+	_, err = tx.Exec(timeoutCtx, `
+        DELETE FROM workflow_node_instances
+        WHERE workflow_id = $1;`,
+		wf.ID)
+	if err != nil {
+		return fmt.Errorf("delete old workflow node instances: %w", err)
+	}
+
+	// 3. Insert new workflow_node_instances
+	// To correctly insert workflow_node_instances, we need the node_library_id for each node.
+	// This requires querying the node_library table to map node_type (from wf.Nodes) to node_library.id.
+
+	// Let's create a map to store `node_type` to `node_library_id` mappings.
+	nodeLibraryIDs := make(map[string]uuid.UUID)
+	nodeLibraryRows, err := tx.Query(timeoutCtx, `SELECT id, node_type FROM node_library;`)
+	if err != nil {
+		return fmt.Errorf("query node_library for IDs: %w", err)
+	}
+	defer nodeLibraryRows.Close()
+
+	for nodeLibraryRows.Next() {
+		var id uuid.UUID
+		var nodeType string
+		if err := nodeLibraryRows.Scan(&id, &nodeType); err != nil {
+			return fmt.Errorf("scan node_library row: %w", err)
+		}
+		nodeLibraryIDs[nodeType] = id
+	}
+	if err := nodeLibraryRows.Err(); err != nil {
+		return fmt.Errorf("node_library rows error: %w", err)
+	}
+
+	for _, node := range wf.Nodes {
+		nodeLibraryID, ok := nodeLibraryIDs[node.Type]
+		if !ok {
+			return fmt.Errorf("node type %s not found in node_library", node.Type)
+		}
+
+		_, err = tx.Exec(timeoutCtx, `
+            INSERT INTO workflow_node_instances (workflow_id, instance_id, node_library_id, x_pos, y_pos)
+            VALUES ($1, $2, $3, $4, $5);`,
+			wf.ID, node.ID, nodeLibraryID, node.Position.X, node.Position.Y)
+		if err != nil {
+			return fmt.Errorf("insert workflow node instance %s: %w", node.ID, err)
+		}
+	}
+
+	// 4. Delete existing workflow_edges for this workflow
+	_, err = tx.Exec(timeoutCtx, `
+        DELETE FROM workflow_edges
+        WHERE workflow_id = $1;`,
+		wf.ID)
+	if err != nil {
+		return fmt.Errorf("delete old workflow edges: %w", err)
+	}
+
+	// 5. Insert new workflow_edges
+	for _, edge := range wf.Edges {
+		_, err = tx.Exec(timeoutCtx, `
+            INSERT INTO workflow_edges (
+                workflow_id, edge_id, source_instance_id, target_instance_id, source_handle,
+                edge_type, animated, label, style_props, label_style
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);`,
+			wf.ID, edge.ID, edge.Source, edge.Target, edge.SourceHandle,
+			edge.Type, edge.Animated, edge.Label, edge.Style, edge.LabelStyle)
+		if err != nil {
+			return fmt.Errorf("insert workflow edge %s: %w", edge.ID, err)
+		}
+	}
+
+	return tx.Commit(timeoutCtx)
 }

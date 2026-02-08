@@ -19,21 +19,6 @@ import (
 // maxRequestBody limits the size of the execute request body to prevent abuse.
 const maxRequestBody = 1 << 20 // 1MB
 
-// writeErrorJSON writes a structured JSON error response with a machine-readable
-// code and a human-readable message. The code allows clients to programmatically
-// distinguish between error types (e.g. retry on INTERNAL_ERROR, don't retry on NOT_FOUND).
-func writeErrorJSON(w http.ResponseWriter, errCode, message string, status int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{"code": errCode, "message": message})
-}
-
-// reqID extracts the request ID from context (set by requestIDMiddleware).
-func reqID(r *http.Request) string {
-	id, _ := r.Context().Value(requestIDKey).(string)
-	return id
-}
-
 // HandleGetWorkflow loads a workflow definition by ID from the database and
 // returns it as JSON in the format React Flow expects (id, nodes, edges).
 func (s *Service) HandleGetWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -83,29 +68,6 @@ func (s *Service) HandleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(payload); err != nil {
 		slog.Error("failed to write response", "id", wfUUID, "requestId", rid, "error", err)
 	}
-}
-
-// buildNodeJSONs constructs typed nodes from storage data and calls
-// each node's ToJSON() to produce the frontend representation.
-func buildNodeJSONs(storageNodes []storage.Node, deps nodes.Deps) ([]nodes.NodeJSON, error) {
-	result := make([]nodes.NodeJSON, 0, len(storageNodes))
-	for _, sn := range storageNodes {
-		base := nodes.BaseFields{
-			ID:          sn.ID,
-			NodeType:    sn.Type,
-			Position:    nodes.Position{X: sn.Position.X, Y: sn.Position.Y},
-			Label:       sn.Data.Label,
-			Description: sn.Data.Description,
-			Metadata:    sn.Data.Metadata,
-		}
-
-		n, err := nodes.New(base, deps)
-		if err != nil {
-			return nil, fmt.Errorf("node %q: %w", sn.ID, err)
-		}
-		result = append(result, n.ToJSON())
-	}
-	return result, nil
 }
 
 // HandleExecuteWorkflow loads a workflow from the database, parses the input
@@ -192,4 +154,42 @@ func (s *Service) HandleExecuteWorkflow(w http.ResponseWriter, r *http.Request) 
 	if _, err := w.Write(payload); err != nil {
 		slog.Error("failed to write response", "id", wfUUID, "requestId", rid, "error", err)
 	}
+}
+
+// buildNodeJSONs constructs typed nodes from storage data and calls
+// each node's ToJSON() to produce the frontend representation.
+func buildNodeJSONs(storageNodes []storage.Node, deps nodes.Deps) ([]nodes.NodeJSON, error) {
+	result := make([]nodes.NodeJSON, 0, len(storageNodes))
+	for _, sn := range storageNodes {
+		base := nodes.BaseFields{
+			ID:          sn.ID,
+			NodeType:    sn.Type,
+			Position:    nodes.Position{X: sn.Position.X, Y: sn.Position.Y},
+			Label:       sn.Data.Label,
+			Description: sn.Data.Description,
+			Metadata:    sn.Data.Metadata,
+		}
+
+		n, err := nodes.New(base, deps)
+		if err != nil {
+			return nil, fmt.Errorf("node %q: %w", sn.ID, err)
+		}
+		result = append(result, n.ToJSON())
+	}
+	return result, nil
+}
+
+// writeErrorJSON writes a structured JSON error response with a machine-readable
+// code and a human-readable message. The code allows clients to programmatically
+// distinguish between error types (e.g. retry on INTERNAL_ERROR, don't retry on NOT_FOUND).
+func writeErrorJSON(w http.ResponseWriter, errCode, message string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{"code": errCode, "message": message})
+}
+
+// reqID extracts the request ID from context (set by requestIDMiddleware).
+func reqID(r *http.Request) string {
+	id, _ := r.Context().Value(requestIDKey).(string)
+	return id
 }
