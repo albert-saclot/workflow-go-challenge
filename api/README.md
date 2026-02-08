@@ -164,6 +164,18 @@ Failure response (node error with partial results):
 }
 ```
 
+### Execution Safeguards
+
+The engine validates and protects each execution:
+
+- **DAG validation** — Before any node runs, a depth-first search checks for cycles using three-colour marking (white/grey/black). A back-edge to a grey node means a cycle; the workflow is rejected immediately.
+- **Total timeout** — The entire execution is bounded to 60 seconds via `context.WithTimeout`.
+- **Per-node timeout** — Each node gets a 10-second child context so a slow API call cannot stall the whole workflow.
+- **Step limit** — Hard cap of 100 steps catches edge cases.
+- **Request tracing** — Every request gets a `X-Request-ID` header (generated or echoed from the client) for log correlation.
+- **Structured errors** — JSON responses include a machine-readable `code` field (`INVALID_ID`, `NOT_FOUND`, `INVALID_BODY`, `INTERNAL_ERROR`).
+- **Read transactions** — `GetWorkflow` runs inside a `REPEATABLE READ`, read-only transaction to guarantee a consistent snapshot across the three queries (header, nodes, edges).
+
 ## Project Structure
 
 ```
@@ -179,10 +191,10 @@ api/
 │   └── db/
 │       ├── postgres.go              # Connection pool config (DefaultConfig, Connect)
 │       └── migration/               # Flyway SQL migrations
-│           ├── V1__create_workflow_orchestrator_system.sql
-│           ├── V2__seed_weather_workflow.sql
-│           ├── V3__add_sms_and_flood_node_types.sql
-│           └── V4__seed_flood_alert_workflow.sql
+│           ├── V1__create_workflow_orchestrator_system.sql  # Schema
+│           ├── V2__seed_weather_workflow.sql                # Weather workflow seed
+│           ├── V3__add_sms_and_flood_node_types.sql        # SMS + flood types
+│           └── V4__seed_flood_alert_workflow.sql            # Flood workflow seed
 └── services/
     ├── nodes/                       # Node type system
     │   ├── node.go                  # Node interface, Deps struct, New() factory

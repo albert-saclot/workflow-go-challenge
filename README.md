@@ -111,15 +111,36 @@ The `executeWorkflow` function walks the workflow DAG from the start node:
 
 1. Constructs typed node instances from stored metadata via the factory
 2. Builds an adjacency list from edges
-3. Executes nodes sequentially, merging each node's output variables into a shared context
-4. Follows outgoing edges — for condition nodes, matches the branch result (`"true"`/`"false"`) against edge `sourceHandle` values
+3. **Validates the graph is a DAG** before executing any nodes (see below)
+4. Executes nodes sequentially, merging each node's output variables into a shared context
+5. Follows outgoing edges — for condition nodes, matches the branch result (`"true"`/`"false"`) against edge `sourceHandle` values
 
-Safeguards:
-- **Cycle detection** — Visited-node set; revisiting a node returns a failed status immediately
+#### Pre-execution DAG Validation
+
+Before any node runs, the engine validates the workflow graph using depth-first search with three-colour marking. Each node starts as **white** (unvisited). When the DFS enters a node it marks it **grey** (visiting). When all of a node's children are fully explored, it becomes **black** (done).
+
+If the DFS reaches a node that is already grey, that means we followed an edge back to a node we're still exploring — a cycle. The engine rejects the workflow immediately with an error, before making any API calls or side effects.
+
+```
+start ──▶ A ──▶ B ──▶ end     ✓ valid DAG (all nodes go white → grey → black)
+
+start ──▶ A ──▶ B
+          ▲     │
+          └─────┘              ✗ cycle detected (B points back to grey A)
+```
+
+This catches malformed workflows upfront rather than wasting API calls on a graph that can never terminate.
+
+#### Safeguards
+
+- **DAG validation** — Three-colour DFS rejects cycles before execution begins
+- **Total workflow timeout** — 60-second cap on the entire execution, enforced via `context.WithTimeout`
+- **Per-node timeout** — Each node runs under its own 10-second timeout to prevent slow API calls from blocking the workflow
 - **Context cancellation** — Checks `ctx.Err()` each iteration so client disconnects stop execution
-- **Per-node timeout** — Each node runs under `context.WithTimeout` (10s) to prevent slow API calls from blocking the workflow
-- **Max step limit** — Hard cap of 100 steps guards against malformed graphs
+- **Max step limit** — Hard cap of 100 steps guards against edge cases the DFS might miss
 - **Partial failure results** — When a node fails, the response includes all completed steps plus the failed node with error details, returned as HTTP 200 with `status: "failed"` (not 500, since the engine itself didn't crash)
+- **Request ID tracing** — Each request gets a unique ID (or reuses the client's `X-Request-ID`) for log correlation
+- **Structured error codes** — JSON error responses include machine-readable codes (`INVALID_ID`, `NOT_FOUND`, `INTERNAL_ERROR`) so clients can distinguish between retryable and non-retryable failures
 
 ### External Client Abstraction
 
@@ -138,7 +159,7 @@ api/
 │   │   └── flood/client.go          # Open-Meteo flood API
 │   └── db/
 │       ├── postgres.go              # Connection pool config
-│       └── migration/               # Flyway SQL migrations (V1-V3)
+│       └── migration/               # Flyway SQL migrations (V1-V4)
 └── services/
     ├── nodes/
     │   ├── node.go                  # Interface, Deps, factory
@@ -167,6 +188,15 @@ api/
 cd api && go test ./... -v
 ```
 
+Tests cover three packages across four test files:
+
+| Package | File | What's tested |
+| :--- | :--- | :--- |
+| `services/nodes` | `node_test.go` | All node Execute() paths, factory, type conversion |
+| `services/storage` | `storage_test.go` | GetWorkflow queries with pgxmock (success, not-found, scan errors) |
+| `services/workflow` | `engine_test.go` | DAG validation, execution flow, branching, cancellation, partial failure |
+| `services/workflow` | `workflow_test.go` | HTTP handlers (GET, POST, 404, 400, 500) |
+
 All tests run in parallel (`t.Parallel()`) and use table-driven patterns. Storage tests use `pgxmock` to avoid requiring a running database.
 
 ## Trade-offs and Known Issues
@@ -183,9 +213,10 @@ All tests run in parallel (`t.Parallel()`) and use table-driven patterns. Storag
 ### Known Limitations
 
 - **No execution persistence** — Execution results are returned in the HTTP response but not stored. A production system would persist runs for audit and replay.
-- **No DAG validation at save time** — Cycles are caught at execution time via the visited-node set, but ideally would be rejected when the workflow is saved.
+- **No DAG validation at save time** — Cycles are caught before execution via DFS, but ideally would also be rejected when the workflow is saved (there is no save endpoint).
 - **Global library mutation** — Changing a library node affects all workflows. A versioning or copy-on-write mechanism would prevent unintended side effects.
 - **Single workflow query** — The storage layer only supports `GetWorkflow`. There's no list, create, update, or delete endpoint.
+- **No client-level tests** — The `pkg/clients/` packages (weather, flood) make real HTTP calls with no `httptest.Server` mocks. Node tests cover the integration boundary but the clients themselves are untested in isolation.
 
 ## Future Considerations
 
