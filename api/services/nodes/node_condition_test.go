@@ -10,14 +10,11 @@ import (
 
 func TestConditionNode_Execute(t *testing.T) {
 	t.Parallel()
-	base := nodes.BaseFields{
-		ID:       "condition",
-		NodeType: "condition",
-		Metadata: json.RawMessage(`{"conditionVariable":"temperature","conditionExpression":"temperature > threshold","outputVariables":["conditionMet"]}`),
-	}
+	defaultMeta := `{"conditionVariable":"temperature","conditionExpression":"temperature > threshold","outputVariables":["conditionMet"]}`
 
 	tests := []struct {
 		name       string
+		metadata   string
 		variables  map[string]any
 		wantErr    string
 		wantMet    bool
@@ -75,11 +72,28 @@ func TestConditionNode_Execute(t *testing.T) {
 			wantMet:    true,
 			wantBranch: "true",
 		},
+		{
+			name:       "custom variable",
+			metadata:   `{"conditionVariable":"discharge","outputVariables":["conditionMet"]}`,
+			variables:  map[string]any{"discharge": 500.0, "operator": "greater_than", "threshold": 100.0},
+			wantMet:    true,
+			wantBranch: "true",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			meta := defaultMeta
+			if tt.metadata != "" {
+				meta = tt.metadata
+			}
+			base := nodes.BaseFields{
+				ID:       "condition",
+				NodeType: "condition",
+				Metadata: json.RawMessage(meta),
+			}
+
 			node, err := nodes.NewConditionNode(base)
 			if err != nil {
 				t.Fatalf("failed to create condition node: %v", err)
@@ -108,32 +122,5 @@ func TestConditionNode_Execute(t *testing.T) {
 				t.Errorf("expected conditionMet=%v, got %v", tt.wantMet, result.Output["conditionMet"])
 			}
 		})
-	}
-}
-
-func TestConditionNode_CustomVariable(t *testing.T) {
-	t.Parallel()
-	base := nodes.BaseFields{
-		ID:       "condition",
-		NodeType: "condition",
-		Metadata: json.RawMessage(`{"conditionVariable":"discharge","outputVariables":["conditionMet"]}`),
-	}
-
-	node, err := nodes.NewConditionNode(base)
-	if err != nil {
-		t.Fatalf("failed to create condition node: %v", err)
-	}
-
-	nCtx := &nodes.NodeContext{Variables: map[string]any{
-		"discharge": 500.0,
-		"operator":  "greater_than",
-		"threshold": 100.0,
-	}}
-	result, err := node.Execute(context.Background(), nCtx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Branch != "true" {
-		t.Errorf("expected branch 'true', got %q", result.Branch)
 	}
 }

@@ -8,19 +8,19 @@ import (
 
 	"workflow-code-test/api/pkg/clients/email"
 	"workflow-code-test/api/services/nodes"
-	// mockEmailClient is available from the nodes_test package due to nodes_common_mocks_test.go
 )
 
 func TestEmailNode_Execute(t *testing.T) {
 	t.Parallel()
-	meta := `{"inputVariables":["email","city"],"outputVariables":["emailSent"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hello from {{city}}"}}`
-	base := nodes.BaseFields{ID: "email", NodeType: "email", Metadata: json.RawMessage(meta)}
+	defaultMeta := `{"inputVariables":["email","city"],"outputVariables":["emailSent"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hello from {{city}}"}}`
 
 	tests := []struct {
 		name      string
+		metadata  string
 		variables map[string]any
 		client    *mockEmailClient
 		wantErr   string
+		checkOut  func(t *testing.T, result *nodes.ExecutionResult)
 	}{
 		{
 			name:      "success",
@@ -45,11 +45,35 @@ func TestEmailNode_Execute(t *testing.T) {
 			client:    &mockEmailClient{err: fmt.Errorf("smtp error")},
 			wantErr:   "failed to send email: smtp error",
 		},
+		{
+			name:      "template resolution",
+			metadata:  `{"inputVariables":["email","city","name"],"outputVariables":["emailSent"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hi {{name}}, the weather in {{city}} is nice."}}`,
+			variables: map[string]any{"email": "a@b.com", "city": "Sydney", "name": "Alice"},
+			client:    &mockEmailClient{result: &email.Result{Sent: true}},
+			checkOut: func(t *testing.T, result *nodes.ExecutionResult) {
+				draft, ok := result.Output["emailDraft"].(map[string]any)
+				if !ok {
+					t.Fatal("expected emailDraft in output")
+				}
+				if draft["subject"] != "Weather in Sydney" {
+					t.Errorf("expected subject 'Weather in Sydney', got %q", draft["subject"])
+				}
+				if draft["body"] != "Hi Alice, the weather in Sydney is nice." {
+					t.Errorf("unexpected body: %q", draft["body"])
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			meta := defaultMeta
+			if tt.metadata != "" {
+				meta = tt.metadata
+			}
+			base := nodes.BaseFields{ID: "email", NodeType: "email", Metadata: json.RawMessage(meta)}
+
 			node, err := nodes.NewEmailNode(base, tt.client)
 			if err != nil {
 				t.Fatalf("failed to create email node: %v", err)
@@ -76,34 +100,9 @@ func TestEmailNode_Execute(t *testing.T) {
 			if result.Output["emailSent"] != true {
 				t.Errorf("expected emailSent=true, got %v", result.Output["emailSent"])
 			}
+			if tt.checkOut != nil {
+				tt.checkOut(t, result)
+			}
 		})
-	}
-}
-
-func TestEmailNode_TemplateResolution(t *testing.T) {
-	t.Parallel()
-	meta := `{"inputVariables":["email","city","name"],"outputVariables":["emailSent"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hi {{name}}, the weather in {{city}} is nice."}}`
-	base := nodes.BaseFields{ID: "email", NodeType: "email", Metadata: json.RawMessage(meta)}
-
-	node, err := nodes.NewEmailNode(base, &mockEmailClient{result: &email.Result{Sent: true}})
-	if err != nil {
-		t.Fatalf("failed to create email node: %v", err)
-	}
-
-	nCtx := &nodes.NodeContext{Variables: map[string]any{"email": "a@b.com", "city": "Sydney", "name": "Alice"}}
-	result, err := node.Execute(context.Background(), nCtx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	draft, ok := result.Output["emailDraft"].(map[string]any)
-	if !ok {
-		t.Fatal("expected emailDraft in output")
-	}
-	if draft["subject"] != "Weather in Sydney" {
-		t.Errorf("expected subject 'Weather in Sydney', got %q", draft["subject"])
-	}
-	if draft["body"] != "Hi Alice, the weather in Sydney is nice." {
-		t.Errorf("unexpected body: %q", draft["body"])
 	}
 }
