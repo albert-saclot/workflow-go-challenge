@@ -12,66 +12,8 @@ All implementation work is in the **backend (`api/`)** and **infrastructure (`do
 - **Backend:** Go API, PostgreSQL database
 - **DevOps:** Docker Compose for orchestration, Flyway for automated migrations, hot reloading for rapid development
 
-## 🚀 Quick Start
 
-### Prerequisites
-
-- Docker & Docker Compose (recommended for development)
-- Node.js v18+ (for local frontend development)
-- Go v1.25+ (for local backend development)
-
-> **Tip:** Node.js and Go are only required if you want to run frontend or backend outside Docker.
-
-### 1. Start All Services
-
-```bash
-docker-compose up --build
-```
-
-- This launches frontend, backend, and database with hot reloading enabled for code changes.
-- To stop and clean up:
-  ```bash
-  docker-compose down
-  ```
-
-### 2. Access Applications
-
-- **Frontend (Workflow Editor):** [http://localhost:3003](http://localhost:3003)
-- **Backend API:** [http://localhost:8086](http://localhost:8086)
-- **Database:** PostgreSQL on `localhost:5876`
-
-### 3. Verify Setup
-
-1. Open [http://localhost:3003](http://localhost:3003) in your browser.
-2. You should see the workflow editor with sample nodes.
-
-## 🔧 Development Workflow
-
-### 🌐 Frontend
-
-- Edit files in `web/src/` and see changes instantly at [http://localhost:3003](http://localhost:3003) (hot reloading via Vite).
-
-### 🖥️ Backend
-
-- Edit files in `api/` and changes are reflected automatically (hot reloading in Docker).
-- If you add new dependencies or make significant changes, rebuild the API container:
-  ```bash
-  docker-compose up --build api
-  ```
-
-### 🗄️ Database
-
-- Schema/configuration details: see [API README](api/README.md#database)
-- After schema changes or migrations, restart the database:
-  ```bash
-  docker-compose restart postgres
-  ```
-- To apply schema changes to the API after updating the database:
-  ```bash
-  docker-compose restart api
-  ```
-
-## Design Approach
+## 📝 Design Approach
 
 The core problem is: build a workflow engine that's extensible (new node types without changing existing code), safe (bounded execution, no infinite loops), and honest about what it doesn't do.
 
@@ -83,7 +25,7 @@ The core problem is: build a workflow engine that's extensible (new node types w
 
 **Business Errors Are Not Server Errors** — Node failures return HTTP 200 with `status: "failed"` and partial results, not 500. A weather API returning bad data is a business outcome — the engine ran correctly, a node within the workflow produced an error. This lets clients inspect completed steps for debugging and avoids conflating "the server crashed" with "the user submitted an invalid city name." That said, 422 would also be defensible for input validation failures.
 
-## Architecture
+## 🏛️ Architecture
 
 ### Data Model: Shared Library
 
@@ -198,29 +140,6 @@ api/
         └── engine_test.go           # Engine unit tests
 ```
 
-## Testing Strategy
-
-```bash
-cd api && go test ./... -v
-```
-
-Tests cover three packages across 11 test files:
-
-| Package | Files | What's tested |
-| :--- | :--- | :--- |
-| `services/nodes` | `node_test.go` + 7 per-type test files | Factory, ToJSON (all 8 node types), Execute paths for every node type |
-| `services/storage` | `storage_test.go` | GetWorkflow, UpsertWorkflow, DeleteWorkflow queries with pgxmock |
-| `services/workflow` | `engine_test.go` | DAG validation, execution flow, branching, cancellation, partial failure |
-| `services/workflow` | `workflow_test.go` | HTTP handlers (GET, POST, 404, 400, 500) |
-
-**Why table-driven**: Every test function uses the `[]struct{ name; input; want }` pattern with `t.Run` subtests. This makes it trivial to add new cases (e.g., adding a "custom variable" condition test is one struct literal, not a new function) and produces clear output showing exactly which case failed.
-
-**Why parallel**: All tests call `t.Parallel()` at both the top-level and subtest level. This catches accidental shared state — if two subtests mutate the same variable, the race detector flags it immediately.
-
-**Why pgxmock over testcontainers**: Storage tests mock the database via `pgxmock.PgxPoolIface`. This keeps tests fast and dependency-free (no running Postgres required), at the cost of not catching real query issues. The trade-off is intentional — integration tests against a real database would be the next layer to add, but unit tests with exact query matching catch the most common bugs (wrong column order, missing WHERE clauses).
-
-**Why mock interfaces, not mock frameworks**: Node tests use hand-written mocks (e.g., `mockWeatherClient`) rather than generated mocks. For interfaces with 1-2 methods, a 5-line struct is simpler and more readable than pulling in `gomock` or `mockery`. The mock is right there in the test file.
-
 ## Trade-offs and Decisions
 
 | Decision | Benefit | Trade-off |
@@ -271,3 +190,85 @@ Ordered by impact, not by ease of implementation:
 5. **Node versioning** — Pin workflows to specific library node versions via content-addressable metadata hashing or explicit version columns. This directly addresses the shared library mutation risk. The schema change is straightforward (add a `version` column to `node_library`, reference it from instances), but the migration path for existing data needs care.
 
 6. **Parallel branch execution** — When independent branches exist in the graph (no data dependency), execute them concurrently with `errgroup`. The engine's adjacency list already supports multiple outgoing edges per node; the change is in the execution loop, not the data model.
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Docker & Docker Compose (recommended for development)
+- Node.js v18+ (for local frontend development)
+- Go v1.25+ (for local backend development)
+
+> **Tip:** Node.js and Go are only required if you want to run frontend or backend outside Docker.
+
+### 1. Start All Services
+
+```bash
+docker-compose up --build
+```
+
+- This launches frontend, backend, and database with hot reloading enabled for code changes.
+- To stop and clean up:
+  ```bash
+  docker-compose down
+  ```
+
+### 2. Access Applications
+
+- **Frontend (Workflow Editor):** [http://localhost:3003](http://localhost:3003)
+- **Backend API:** [http://localhost:8086](http://localhost:8086)
+- **Database:** PostgreSQL on `localhost:5876`
+
+### 3. Verify Setup
+
+1. Open [http://localhost:3003](http://localhost:3003) in your browser.
+2. You should see the workflow editor with sample nodes.
+
+## 🔧 Development Workflow
+
+### 🌐 Frontend
+
+- Edit files in `web/src/` and see changes instantly at [http://localhost:3003](http://localhost:3003) (hot reloading via Vite).
+
+### 🖥️ Backend
+
+- Edit files in `api/` and changes are reflected automatically (hot reloading in Docker).
+- If you add new dependencies or make significant changes, rebuild the API container:
+  ```bash
+  docker-compose up --build api
+  ```
+
+### 🗄️ Database
+
+- Schema/configuration details: see [API README](api/README.md#database)
+- After schema changes or migrations, restart the database:
+  ```bash
+  docker-compose restart postgres
+  ```
+- To apply schema changes to the API after updating the database:
+  ```bash
+  docker-compose restart api
+  ```
+
+## Testing Strategy
+
+```bash
+cd api && go test ./... -v
+```
+
+Tests cover three packages across 11 test files:
+
+| Package | Files | What's tested |
+| :--- | :--- | :--- |
+| `services/nodes` | `node_test.go` + 7 per-type test files | Factory, ToJSON (all 8 node types), Execute paths for every node type |
+| `services/storage` | `storage_test.go` | GetWorkflow, UpsertWorkflow, DeleteWorkflow queries with pgxmock |
+| `services/workflow` | `engine_test.go` | DAG validation, execution flow, branching, cancellation, partial failure |
+| `services/workflow` | `workflow_test.go` | HTTP handlers (GET, POST, 404, 400, 500) |
+
+**Why table-driven**: Every test function uses the `[]struct{ name; input; want }` pattern with `t.Run` subtests. This makes it trivial to add new cases (e.g., adding a "custom variable" condition test is one struct literal, not a new function) and produces clear output showing exactly which case failed.
+
+**Why parallel**: All tests call `t.Parallel()` at both the top-level and subtest level. This catches accidental shared state — if two subtests mutate the same variable, the race detector flags it immediately.
+
+**Why pgxmock over testcontainers**: Storage tests mock the database via `pgxmock.PgxPoolIface`. This keeps tests fast and dependency-free (no running Postgres required), at the cost of not catching real query issues. The trade-off is intentional — integration tests against a real database would be the next layer to add, but unit tests with exact query matching catch the most common bugs (wrong column order, missing WHERE clauses).
+
+**Why mock interfaces, not mock frameworks**: Node tests use hand-written mocks (e.g., `mockWeatherClient`) rather than generated mocks. For interfaces with 1-2 methods, a 5-line struct is simpler and more readable than pulling in `gomock` or `mockery`. The mock is right there in the test file.
