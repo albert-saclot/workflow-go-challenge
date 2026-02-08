@@ -8,8 +8,6 @@ import (
 	"workflow-code-test/api/services/nodes"
 )
 
-func strPtr(s string) *string { return &s }
-
 func TestConditionNode_Execute(t *testing.T) {
 	t.Parallel()
 	base := nodes.BaseFields{
@@ -139,4 +137,3 @@ func TestConditionNode_CustomVariable(t *testing.T) {
 		t.Errorf("expected branch 'true', got %q", result.Branch)
 	}
 }
-
