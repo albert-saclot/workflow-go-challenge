@@ -3,7 +3,59 @@ package nodes
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
+
+	"workflow-code-test/api/pkg/clients/email"
+	"workflow-code-test/api/pkg/clients/flood"
+	"workflow-code-test/api/pkg/clients/sms"
+	"workflow-code-test/api/pkg/clients/weather"
+)
+
+// Mock clients for node execution tests
+
+type mockWeatherClient struct {
+	temp float64
+	err  error
+}
+
+func (m *mockWeatherClient) GetTemperature(_ context.Context, _, _ float64) (float64, error) {
+	return m.temp, m.err
+}
+
+type mockEmailClient struct {
+	result *email.Result
+	err    error
+}
+
+func (m *mockEmailClient) Send(_ context.Context, _ email.Message) (*email.Result, error) {
+	return m.result, m.err
+}
+
+type mockSmsClient struct {
+	result *sms.Result
+	err    error
+}
+
+func (m *mockSmsClient) Send(_ context.Context, _ sms.Message) (*sms.Result, error) {
+	return m.result, m.err
+}
+
+type mockFloodClient struct {
+	result *flood.Result
+	err    error
+}
+
+func (m *mockFloodClient) GetFloodRisk(_ context.Context, _, _ float64) (*flood.Result, error) {
+	return m.result, m.err
+}
+
+// Ensure mocks satisfy interfaces at compile time.
+var (
+	_ weather.Client = (*mockWeatherClient)(nil)
+	_ email.Client   = (*mockEmailClient)(nil)
+	_ sms.Client     = (*mockSmsClient)(nil)
+	_ flood.Client   = (*mockFloodClient)(nil)
 )
 
 func TestFormNode_Execute(t *testing.T) {
@@ -250,6 +302,300 @@ func TestNodeFactory(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWeatherNode_Execute(t *testing.T) {
+	t.Parallel()
+	meta := `{"apiEndpoint":"https://example.com","inputVariables":["city"],"outputVariables":["temperature"],"options":[{"city":"Sydney","lat":-33.87,"lon":151.21}]}`
+	base := BaseFields{ID: "weather", NodeType: "integration", Metadata: json.RawMessage(meta)}
+
+	tests := []struct {
+		name      string
+		variables map[string]any
+		client    *mockWeatherClient
+		wantErr   string
+		wantTemp  float64
+	}{
+		{
+			name:      "success",
+			variables: map[string]any{"city": "Sydney"},
+			client:    &mockWeatherClient{temp: 28.5},
+			wantTemp:  28.5,
+		},
+		{
+			name:      "missing city variable",
+			variables: map[string]any{},
+			client:    &mockWeatherClient{},
+			wantErr:   "missing required input variable: city",
+		},
+		{
+			name:      "unsupported city",
+			variables: map[string]any{"city": "Tokyo"},
+			client:    &mockWeatherClient{},
+			wantErr:   "unsupported city: Tokyo",
+		},
+		{
+			name:      "api error",
+			variables: map[string]any{"city": "Sydney"},
+			client:    &mockWeatherClient{err: fmt.Errorf("connection refused")},
+			wantErr:   "weather lookup failed: connection refused",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			node, err := NewWeatherNode(base, tt.client)
+			if err != nil {
+				t.Fatalf("failed to create weather node: %v", err)
+			}
+
+			nCtx := &NodeContext{Variables: tt.variables}
+			result, err := node.Execute(context.Background(), nCtx)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error %q, got nil", tt.wantErr)
+				}
+				if err.Error() != tt.wantErr {
+					t.Errorf("expected error %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			temp, ok := result.Output["temperature"].(float64)
+			if !ok || temp != tt.wantTemp {
+				t.Errorf("expected temperature %v, got %v", tt.wantTemp, result.Output["temperature"])
+			}
+		})
+	}
+}
+
+func TestEmailNode_Execute(t *testing.T) {
+	t.Parallel()
+	meta := `{"inputVariables":["email","city"],"outputVariables":["emailSent"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hello from {{city}}"}}`
+	base := BaseFields{ID: "email", NodeType: "email", Metadata: json.RawMessage(meta)}
+
+	tests := []struct {
+		name      string
+		variables map[string]any
+		client    *mockEmailClient
+		wantErr   string
+	}{
+		{
+			name:      "success",
+			variables: map[string]any{"email": "alice@example.com", "city": "Sydney"},
+			client:    &mockEmailClient{result: &email.Result{DeliveryStatus: "sent", Sent: true}},
+		},
+		{
+			name:      "missing email variable",
+			variables: map[string]any{"city": "Sydney"},
+			client:    &mockEmailClient{},
+			wantErr:   "missing or invalid variable: email",
+		},
+		{
+			name:      "empty email variable",
+			variables: map[string]any{"email": "", "city": "Sydney"},
+			client:    &mockEmailClient{},
+			wantErr:   "missing or invalid variable: email",
+		},
+		{
+			name:      "send failure",
+			variables: map[string]any{"email": "alice@example.com", "city": "Sydney"},
+			client:    &mockEmailClient{err: fmt.Errorf("smtp error")},
+			wantErr:   "failed to send email: smtp error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			node, err := NewEmailNode(base, tt.client)
+			if err != nil {
+				t.Fatalf("failed to create email node: %v", err)
+			}
+
+			nCtx := &NodeContext{Variables: tt.variables}
+			result, err := node.Execute(context.Background(), nCtx)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error %q, got nil", tt.wantErr)
+				}
+				if err.Error() != tt.wantErr {
+					t.Errorf("expected error %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Status != "completed" {
+				t.Errorf("expected status 'completed', got %q", result.Status)
+			}
+			if result.Output["emailSent"] != true {
+				t.Errorf("expected emailSent=true, got %v", result.Output["emailSent"])
+			}
+		})
+	}
+}
+
+func TestEmailNode_TemplateResolution(t *testing.T) {
+	t.Parallel()
+	meta := `{"inputVariables":["email","city","name"],"outputVariables":["emailSent"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hi {{name}}, the weather in {{city}} is nice."}}`
+	base := BaseFields{ID: "email", NodeType: "email", Metadata: json.RawMessage(meta)}
+
+	node, err := NewEmailNode(base, &mockEmailClient{result: &email.Result{Sent: true}})
+	if err != nil {
+		t.Fatalf("failed to create email node: %v", err)
+	}
+
+	nCtx := &NodeContext{Variables: map[string]any{"email": "a@b.com", "city": "Sydney", "name": "Alice"}}
+	result, err := node.Execute(context.Background(), nCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	draft, ok := result.Output["emailDraft"].(map[string]any)
+	if !ok {
+		t.Fatal("expected emailDraft in output")
+	}
+	if draft["subject"] != "Weather in Sydney" {
+		t.Errorf("expected subject 'Weather in Sydney', got %q", draft["subject"])
+	}
+	if draft["body"] != "Hi Alice, the weather in Sydney is nice." {
+		t.Errorf("unexpected body: %q", draft["body"])
+	}
+}
+
+func TestSmsNode_Execute(t *testing.T) {
+	t.Parallel()
+	meta := `{"inputVariables":["phone","message"],"outputVariables":["smsSent"]}`
+	base := BaseFields{ID: "sms", NodeType: "sms", Metadata: json.RawMessage(meta)}
+
+	tests := []struct {
+		name      string
+		variables map[string]any
+		client    *mockSmsClient
+		wantErr   string
+	}{
+		{
+			name:      "success",
+			variables: map[string]any{"phone": "+61400000000", "message": "flood alert"},
+			client:    &mockSmsClient{result: &sms.Result{DeliveryStatus: "sent", Sent: true}},
+		},
+		{
+			name:      "missing phone variable",
+			variables: map[string]any{"message": "flood alert"},
+			client:    &mockSmsClient{},
+			wantErr:   "missing or invalid variable: phone",
+		},
+		{
+			name:      "send failure",
+			variables: map[string]any{"phone": "+61400000000", "message": "flood alert"},
+			client:    &mockSmsClient{err: fmt.Errorf("provider error")},
+			wantErr:   "failed to send sms: provider error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			node, err := NewSmsNode(base, tt.client)
+			if err != nil {
+				t.Fatalf("failed to create sms node: %v", err)
+			}
+
+			nCtx := &NodeContext{Variables: tt.variables}
+			result, err := node.Execute(context.Background(), nCtx)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error %q, got nil", tt.wantErr)
+				}
+				if err.Error() != tt.wantErr {
+					t.Errorf("expected error %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Output["smsSent"] != true {
+				t.Errorf("expected smsSent=true, got %v", result.Output["smsSent"])
+			}
+		})
+	}
+}
+
+func TestFloodNode_Execute(t *testing.T) {
+	t.Parallel()
+	meta := `{"apiEndpoint":"https://example.com","inputVariables":["city"],"outputVariables":["floodRisk","discharge"],"options":[{"city":"Brisbane","lat":-27.47,"lon":153.03}]}`
+	base := BaseFields{ID: "flood", NodeType: "flood", Metadata: json.RawMessage(meta)}
+
+	tests := []struct {
+		name      string
+		variables map[string]any
+		client    *mockFloodClient
+		wantErr   string
+		wantRisk  string
+	}{
+		{
+			name:      "success",
+			variables: map[string]any{"city": "Brisbane"},
+			client:    &mockFloodClient{result: &flood.Result{Discharge: 250.0, RiskLevel: "moderate"}},
+			wantRisk:  "moderate",
+		},
+		{
+			name:      "missing city variable",
+			variables: map[string]any{},
+			client:    &mockFloodClient{},
+			wantErr:   "missing required input variable: city",
+		},
+		{
+			name:      "unsupported city",
+			variables: map[string]any{"city": "London"},
+			client:    &mockFloodClient{},
+			wantErr:   "unsupported city: London",
+		},
+		{
+			name:      "api error",
+			variables: map[string]any{"city": "Brisbane"},
+			client:    &mockFloodClient{err: fmt.Errorf("timeout")},
+			wantErr:   "flood risk lookup failed: timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			node, err := NewFloodNode(base, tt.client)
+			if err != nil {
+				t.Fatalf("failed to create flood node: %v", err)
+			}
+
+			nCtx := &NodeContext{Variables: tt.variables}
+			result, err := node.Execute(context.Background(), nCtx)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error %q, got nil", tt.wantErr)
+				}
+				if err.Error() != tt.wantErr {
+					t.Errorf("expected error %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Output["floodRisk"] != tt.wantRisk {
+				t.Errorf("expected risk %q, got %v", tt.wantRisk, result.Output["floodRisk"])
 			}
 		})
 	}
