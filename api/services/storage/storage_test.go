@@ -1,4 +1,4 @@
-package storage
+package storage_test
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 	"time"
+	"workflow-code-test/api/services/storage"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -62,12 +63,12 @@ func TestGetWorkflow(t *testing.T) {
 		name      string
 		setupMock func(mock pgxmock.PgxPoolIface)
 		wantErr   error
-		checkWf   func(t *testing.T, wf *Workflow)
+		checkWf   func(t *testing.T, wf *storage.Workflow)
 	}{
 		{
 			name:      "success returns hydrated workflow",
 			setupMock: setupSuccessMock,
-			checkWf: func(t *testing.T, wf *Workflow) {
+			checkWf: func(t *testing.T, wf *storage.Workflow) {
 				t.Helper()
 
 				if wf.Name != "Weather Check System" {
@@ -191,7 +192,7 @@ func TestGetWorkflow(t *testing.T) {
 
 			tt.setupMock(mock)
 
-			store := &pgStorage{db: mock}
+			store := &storage.PgStorage{DB: mock}
 			wf, err := store.GetWorkflow(context.Background(), testWfID)
 
 			if tt.wantErr != nil {
@@ -227,24 +228,24 @@ func TestUpsertWorkflow(t *testing.T) {
 	)
 
 	tests := []struct {
-		name string
-		wf   *Workflow
-		setupMock func(mock pgxmock.PgxPoolIface, wf *Workflow)
-		wantErr error
+		name      string
+		wf        *storage.Workflow
+		setupMock func(mock pgxmock.PgxPoolIface, wf *storage.Workflow)
+		wantErr   error
 	}{
 		{
 			name: "insert new workflow successfully",
-			wf: &Workflow{
+			wf: &storage.Workflow{
 				ID:   uuid.MustParse("550e8400-e29b-41d4-a716-446655440001"),
 				Name: "New Test Workflow",
-				Nodes: []Node{
+				Nodes: []storage.Node{
 					{
-						ID:   "start-node-new",
-						Type: "start",
-						Position: NodePosition{X: 0, Y: 0},
+						ID:       "start-node-new",
+						Type:     "start",
+						Position: storage.NodePosition{X: 0, Y: 0},
 					},
 				},
-				Edges: []Edge{
+				Edges: []storage.Edge{
 					{
 						ID:     "edge-new",
 						Source: "start-node-new",
@@ -252,7 +253,7 @@ func TestUpsertWorkflow(t *testing.T) {
 					},
 				},
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface, wf *Workflow) {
+			setupMock: func(mock pgxmock.PgxPoolIface, wf *storage.Workflow) {
 				mock.ExpectBeginTx(pgx.TxOptions{
 					IsoLevel: pgx.ReadCommitted,
 				})
@@ -296,22 +297,22 @@ func TestUpsertWorkflow(t *testing.T) {
 		},
 		{
 			name: "update existing workflow successfully",
-			wf: &Workflow{
+			wf: &storage.Workflow{
 				ID:   testWfID, // Use existing ID
 				Name: "Updated Weather Check System",
-				Nodes: []Node{
+				Nodes: []storage.Node{
 					{
-						ID:   "start-updated",
-						Type: "start",
-						Position: NodePosition{X: 10, Y: 20},
+						ID:       "start-updated",
+						Type:     "start",
+						Position: storage.NodePosition{X: 10, Y: 20},
 					},
 					{
-						ID:   "form-updated",
-						Type: "form",
-						Position: NodePosition{X: 50, Y: 60},
+						ID:       "form-updated",
+						Type:     "form",
+						Position: storage.NodePosition{X: 50, Y: 60},
 					},
 				},
-				Edges: []Edge{
+				Edges: []storage.Edge{
 					{
 						ID:     "edge-updated-1",
 						Source: "start-updated",
@@ -324,7 +325,7 @@ func TestUpsertWorkflow(t *testing.T) {
 					},
 				},
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface, wf *Workflow) {
+			setupMock: func(mock pgxmock.PgxPoolIface, wf *storage.Workflow) {
 				mock.ExpectBeginTx(pgx.TxOptions{
 					IsoLevel: pgx.ReadCommitted,
 				})
@@ -374,19 +375,19 @@ func TestUpsertWorkflow(t *testing.T) {
 		},
 		{
 			name: "returns error if node type not in node_library",
-			wf: &Workflow{
+			wf: &storage.Workflow{
 				ID:   uuid.MustParse("550e8400-e29b-41d4-a716-446655440002"),
 				Name: "Workflow With Unknown Node",
-				Nodes: []Node{
+				Nodes: []storage.Node{
 					{
-						ID:   "unknown-node",
-						Type: "mystery", // This type won't be in our mocked node_library
-						Position: NodePosition{X: 0, Y: 0},
+						ID:       "unknown-node",
+						Type:     "mystery", // This type won't be in our mocked node_library
+						Position: storage.NodePosition{X: 0, Y: 0},
 					},
 				},
-				Edges: []Edge{},
+				Edges: []storage.Edge{},
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface, wf *Workflow) {
+			setupMock: func(mock pgxmock.PgxPoolIface, wf *storage.Workflow) {
 				mock.ExpectBeginTx(pgx.TxOptions{
 					IsoLevel: pgx.ReadCommitted,
 				})
@@ -420,7 +421,7 @@ func TestUpsertWorkflow(t *testing.T) {
 
 			tt.setupMock(mock, tt.wf)
 
-			store := &pgStorage{db: mock}
+			store := &storage.PgStorage{DB: mock}
 			err = store.UpsertWorkflow(context.Background(), tt.wf)
 
 			if tt.wantErr != nil {
@@ -534,7 +535,7 @@ func TestDeleteWorkflow(t *testing.T) {
 
 			tt.setupMock(mock, tt.id)
 
-			store := &pgStorage{db: mock}
+			store := &storage.PgStorage{DB: mock}
 			err = store.DeleteWorkflow(context.Background(), tt.id)
 
 			if tt.wantErr != nil {

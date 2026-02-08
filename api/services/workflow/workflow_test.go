@@ -1,4 +1,4 @@
-package workflow
+package workflow_test
 
 import (
 	"context"
@@ -15,30 +15,13 @@ import (
 
 	"workflow-code-test/api/services/nodes"
 	"workflow-code-test/api/services/storage"
+	"workflow-code-test/api/services/storage/storagemock"
+	"workflow-code-test/api/services/workflow"
 )
-
-// mockStorage implements storage.Storage for testing handlers
-// without a real database connection.
-type mockStorage struct {
-	workflow *storage.Workflow
-	err      error
-}
-
-func (m *mockStorage) GetWorkflow(_ context.Context, _ uuid.UUID) (*storage.Workflow, error) {
-	return m.workflow, m.err
-}
-
-func (m *mockStorage) UpsertWorkflow(_ context.Context, _ *storage.Workflow) error {
-	return m.err // Or nil if no error is expected by default
-}
-
-func (m *mockStorage) DeleteWorkflow(_ context.Context, _ uuid.UUID) error {
-	return m.err // Or nil if no error is expected by default
-}
 
 // newTestRouter wires up the service with mux routing so handler tests
 // can exercise the full request path including URL parameter extraction.
-func newTestRouter(svc *Service) *mux.Router {
+func newTestRouter(svc *workflow.Service) *mux.Router {
 	router := mux.NewRouter()
 	api := router.PathPrefix("/api/v1").Subrouter()
 	svc.LoadRoutes(api)
@@ -47,7 +30,7 @@ func newTestRouter(svc *Service) *mux.Router {
 
 func TestNewService_NilStore(t *testing.T) {
 	t.Parallel()
-	_, err := NewService(nil, nodes.Deps{})
+	_, err := workflow.NewService(nil, nodes.Deps{})
 	if err == nil {
 		t.Error("expected error for nil store, got nil")
 	}
@@ -55,55 +38,45 @@ func TestNewService_NilStore(t *testing.T) {
 
 func TestHandleGetWorkflow(t *testing.T) {
 	t.Parallel()
-	wfID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 
-	sampleWorkflow := &storage.Workflow{
-		ID:   wfID,
-		Name: "Weather Check System",
-		Nodes: []storage.Node{
-			{
-				ID:       "start",
-				Type:     "start",
-				Position: storage.NodePosition{X: -160, Y: 300},
-				Data: storage.NodeData{
-					Label:       "Start",
-					Description: "Begin weather check workflow",
-					Metadata:    json.RawMessage(`{"hasHandles":{"source":true,"target":false}}`),
-				},
-			},
-		},
-		Edges: []storage.Edge{},
-	}
-
-	tests := []struct {
+	wfUUID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	tests := [...]struct {
 		name       string
 		url        string
-		store      *mockStorage
+		store      *storagemock.StorageMock
 		wantStatus int
 		checkBody  func(t *testing.T, body []byte)
 	}{
 		{
 			name:       "invalid UUID returns 400",
 			url:        "/api/v1/workflows/not-a-uuid",
-			store:      &mockStorage{},
+			store:      &storagemock.StorageMock{},
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "workflow not found returns 404",
-			url:        "/api/v1/workflows/" + uuid.New().String(),
-			store:      &mockStorage{err: pgx.ErrNoRows},
+			name: "workflow not found returns 404",
+			url:  "/api/v1/workflows/" + wfUUID.String(),
+			store: &storagemock.StorageMock{
+				GetWorkflowMock: func(ctx context.Context, id uuid.UUID) (*storage.Workflow, error) {
+					return nil, pgx.ErrNoRows
+				},
+			},
 			wantStatus: http.StatusNotFound,
 		},
 		{
-			name:       "storage error returns 500",
-			url:        "/api/v1/workflows/" + uuid.New().String(),
-			store:      &mockStorage{err: errors.New("connection refused")},
+			name: "storage error returns 500",
+			url:  "/api/v1/workflows/" + uuid.New().String(),
+			store: &storagemock.StorageMock{
+				GetWorkflowMock: func(ctx context.Context, id uuid.UUID) (*storage.Workflow, error) {
+					return nil, errors.New("connection refused")
+				},
+			},
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:       "valid workflow returns 200 with React Flow shape",
-			url:        "/api/v1/workflows/" + wfID.String(),
-			store:      &mockStorage{workflow: sampleWorkflow},
+			url:        "/api/v1/workflows/" + wfUUID.String(),
+			store:      &storagemock.StorageMock{},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body []byte) {
 				var result map[string]json.RawMessage
@@ -140,7 +113,7 @@ func TestHandleGetWorkflow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			svc, err := NewService(tt.store, nodes.Deps{})
+			svc, err := workflow.NewService(tt.store, nodes.Deps{})
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
 			}
@@ -164,11 +137,11 @@ func TestHandleGetWorkflow(t *testing.T) {
 
 func TestHandleExecuteWorkflow(t *testing.T) {
 	t.Parallel()
-	wfID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 
 	// Minimal workflow: start → end (no external calls needed)
+	wfUUID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	startEndWorkflow := &storage.Workflow{
-		ID:   wfID,
+		ID:   wfUUID,
 		Name: "Test Workflow",
 		Nodes: []storage.Node{
 			{
@@ -202,11 +175,11 @@ func TestHandleExecuteWorkflow(t *testing.T) {
 		},
 	}
 
-	tests := []struct {
+	tests := [...]struct {
 		name       string
 		url        string
 		body       string
-		store      *mockStorage
+		store      *storagemock.StorageMock
 		wantStatus int
 		checkBody  func(t *testing.T, body []byte)
 	}{
@@ -214,38 +187,50 @@ func TestHandleExecuteWorkflow(t *testing.T) {
 			name:       "invalid UUID returns 400",
 			url:        "/api/v1/workflows/bad-id/execute",
 			body:       `{}`,
-			store:      &mockStorage{},
+			store:      &storagemock.StorageMock{},
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name:       "empty body returns 400",
-			url:        "/api/v1/workflows/" + wfID.String() + "/execute",
+			url:        "/api/v1/workflows/" + wfUUID.String() + "/execute",
 			body:       "",
-			store:      &mockStorage{workflow: startEndWorkflow},
+			store:      &storagemock.StorageMock{}, //&mockStorage{workflow: startEndWorkflow},
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "workflow not found returns 404",
-			url:        "/api/v1/workflows/" + uuid.New().String() + "/execute",
-			body:       `{}`,
-			store:      &mockStorage{err: pgx.ErrNoRows},
+			name: "workflow not found returns 404",
+			url:  "/api/v1/workflows/" + uuid.New().String() + "/execute",
+			body: `{}`,
+			store: &storagemock.StorageMock{
+				GetWorkflowMock: func(ctx context.Context, id uuid.UUID) (*storage.Workflow, error) {
+					return nil, pgx.ErrNoRows
+				},
+			},
 			wantStatus: http.StatusNotFound,
 		},
 		{
-			name:       "storage error returns 500",
-			url:        "/api/v1/workflows/" + uuid.New().String() + "/execute",
-			body:       `{}`,
-			store:      &mockStorage{err: errors.New("connection refused")},
+			name: "storage error returns 500",
+			url:  "/api/v1/workflows/" + uuid.New().String() + "/execute",
+			body: `{}`,
+			store: &storagemock.StorageMock{
+				GetWorkflowMock: func(ctx context.Context, id uuid.UUID) (*storage.Workflow, error) {
+					return nil, errors.New("connection refused")
+				},
+			},
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
-			name:       "start-end workflow executes successfully",
-			url:        "/api/v1/workflows/" + wfID.String() + "/execute",
-			body:       `{"formData":{"name":"Alice"},"condition":{}}`,
-			store:      &mockStorage{workflow: startEndWorkflow},
+			name: "start-end workflow executes successfully",
+			url:  "/api/v1/workflows/" + wfUUID.String() + "/execute",
+			body: `{"formData":{"name":"Alice"},"condition":{}}`,
+			store: &storagemock.StorageMock{
+				GetWorkflowMock: func(ctx context.Context, id uuid.UUID) (*storage.Workflow, error) {
+					return startEndWorkflow, nil
+				},
+			},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body []byte) {
-				var result ExecutionResponse
+				var result workflow.ExecutionResponse
 				if err := json.Unmarshal(body, &result); err != nil {
 					t.Fatalf("failed to unmarshal response: %v", err)
 				}
@@ -274,7 +259,7 @@ func TestHandleExecuteWorkflow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			svc, err := NewService(tt.store, nodes.Deps{})
+			svc, err := workflow.NewService(tt.store, nodes.Deps{})
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
 			}

@@ -49,8 +49,8 @@ type ExecutionResponse struct {
 // edgeTarget represents a single outgoing edge from a node.
 // sourceHandle is non-nil for condition branches ("true"/"false").
 type edgeTarget struct {
-	targetID     string
-	sourceHandle *string
+	TargetID     string
+	SourceHandle *string
 }
 
 // executeWorkflow walks the workflow graph from the start node, executing
@@ -87,8 +87,8 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 	adjacency := make(map[string][]edgeTarget)
 	for _, e := range wf.Edges {
 		adjacency[e.Source] = append(adjacency[e.Source], edgeTarget{
-			targetID:     e.Target,
-			sourceHandle: e.SourceHandle,
+			TargetID:     e.Target,
+			SourceHandle: e.SourceHandle,
 		})
 	}
 
@@ -217,11 +217,11 @@ func validateDAG(storageNodes []storage.Node, adjacency map[string][]edgeTarget)
 	dfs = func(id string) error {
 		state[id] = visiting
 		for _, e := range adjacency[id] {
-			switch state[e.targetID] {
+			switch state[e.TargetID] {
 			case visiting:
-				return fmt.Errorf("cycle detected at node %q", e.targetID)
+				return fmt.Errorf("cycle detected at node %q", e.TargetID)
 			case unvisited:
-				if err := dfs(e.targetID); err != nil {
+				if err := dfs(e.TargetID); err != nil {
 					return err
 				}
 			}
@@ -247,8 +247,8 @@ func nextNode(edges []edgeTarget, branch string) string {
 	// If there's a branch (condition node), match by sourceHandle
 	if branch != "" {
 		for _, e := range edges {
-			if e.sourceHandle != nil && *e.sourceHandle == branch {
-				return e.targetID
+			if e.SourceHandle != nil && *e.SourceHandle == branch {
+				return e.TargetID
 			}
 		}
 		return "" // no matching branch
@@ -256,11 +256,11 @@ func nextNode(edges []edgeTarget, branch string) string {
 
 	// Non-branching node: follow the single outgoing edge
 	for _, e := range edges {
-		if e.sourceHandle == nil {
-			return e.targetID
+		if e.SourceHandle == nil {
+			return e.TargetID
 		}
 	}
 
 	// Fallback: take the first edge
-	return edges[0].targetID
+	return edges[0].TargetID
 }

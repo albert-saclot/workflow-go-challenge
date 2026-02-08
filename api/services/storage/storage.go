@@ -20,7 +20,7 @@ type DB interface {
 
 // pgStorage implements the Storage interface using PostgreSQL.
 type pgStorage struct {
-	db DB
+	DB DB
 }
 
 // Storage defines the interface for workflow data access.
@@ -37,7 +37,7 @@ func NewInstance(db *pgxpool.Pool) (Storage, error) {
 	if db == nil {
 		return nil, fmt.Errorf("repository: db connection cannot be nil")
 	}
-	return &pgStorage{db: db}, nil
+	return &pgStorage{DB: db}, nil
 }
 
 // GetWorkflow retrieves a complete workflow by ID, hydrating it from three tables:
@@ -53,7 +53,7 @@ func (r *pgStorage) GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, e
 
 	// Wrap all queries in a read-only transaction so the three SELECTs
 	// (header, nodes, edges) see a consistent snapshot of the database.
-	tx, err := r.db.BeginTx(timeoutCtx, pgx.TxOptions{
+	tx, err := r.DB.BeginTx(timeoutCtx, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
 	})
@@ -160,7 +160,7 @@ func (r *pgStorage) UpsertWorkflow(ctx context.Context, wf *Workflow) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second) // Increased timeout for multiple operations
 	defer cancel()
 
-	tx, err := r.db.BeginTx(timeoutCtx, pgx.TxOptions{
+	tx, err := r.DB.BeginTx(timeoutCtx, pgx.TxOptions{
 		IsoLevel: pgx.ReadCommitted, // ReadCommitted suitable for write transactions
 	})
 	if err != nil {
@@ -265,7 +265,7 @@ func (r *pgStorage) DeleteWorkflow(ctx context.Context, id uuid.UUID) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	tx, err := r.db.BeginTx(timeoutCtx, pgx.TxOptions{
+	tx, err := r.DB.BeginTx(timeoutCtx, pgx.TxOptions{
 		IsoLevel: pgx.ReadCommitted,
 	})
 	if err != nil {
@@ -307,4 +307,3 @@ func (r *pgStorage) DeleteWorkflow(ctx context.Context, id uuid.UUID) error {
 
 	return tx.Commit(timeoutCtx)
 }
-
