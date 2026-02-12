@@ -56,17 +56,21 @@ go test ./... -v
 | :--- | :--- | :--- |
 | Weather Check System | `550e8400-e29b-41d4-a716-446655440000` | Form → Weather API → Condition → Email |
 | Flood Alert System | `b7a1c3d0-5f2e-4a89-9c01-def456789abc` | Form → Flood API → Condition → SMS |
+| Weather Monitor Loop | `d4e5f6a7-8b9c-0d1e-2f3a-456789abcdef` | Form → Weather API → Condition → Email → Weather API (loop) |
 
 ### GET workflow definition
 
 Returns the workflow in React Flow format (nodes, edges, positions).
 
 ```bash
-# Weather workflow
+# Weather Check System — linear: form → weather API → condition → email → end
 curl http://localhost:8086/api/v1/workflows/550e8400-e29b-41d4-a716-446655440000
 
-# Flood workflow
+# Flood Alert System — linear: form → flood API → condition → SMS → end
 curl http://localhost:8086/api/v1/workflows/b7a1c3d0-5f2e-4a89-9c01-def456789abc
+
+# Weather Monitor Loop — cyclic: form → weather API → condition →(true)→ email → weather API (back-edge), condition →(false)→ end
+curl http://localhost:8086/api/v1/workflows/d4e5f6a7-8b9c-0d1e-2f3a-456789abcdef
 ```
 
 Response:
@@ -103,7 +107,7 @@ Response:
 Executes the workflow graph from start to end. Pass form data and condition parameters in the request body.
 
 ```bash
-# Execute weather workflow
+# Execute weather workflow — sends email if temperature > 25°C
 curl -X POST http://localhost:8086/api/v1/workflows/550e8400-e29b-41d4-a716-446655440000/execute \
      -H "Content-Type: application/json" \
      -d '{
@@ -118,7 +122,7 @@ curl -X POST http://localhost:8086/api/v1/workflows/550e8400-e29b-41d4-a716-4466
        }
      }'
 
-# Execute flood workflow
+# Execute flood workflow — sends SMS if flood discharge > 100 m³/s
 curl -X POST http://localhost:8086/api/v1/workflows/b7a1c3d0-5f2e-4a89-9c01-def456789abc/execute \
      -H "Content-Type: application/json" \
      -d '{
@@ -130,6 +134,21 @@ curl -X POST http://localhost:8086/api/v1/workflows/b7a1c3d0-5f2e-4a89-9c01-def4
        "condition": {
          "operator": "greater_than",
          "threshold": 100
+       }
+     }'
+
+# Execute loop workflow — re-checks weather and emails until temperature ≤ 25°C (or hits maxExecutionSteps)
+curl -X POST http://localhost:8086/api/v1/workflows/d4e5f6a7-8b9c-0d1e-2f3a-456789abcdef/execute \
+     -H "Content-Type: application/json" \
+     -d '{
+       "formData": {
+         "name": "Alice",
+         "email": "alice@example.com",
+         "city": "Sydney"
+       },
+       "condition": {
+         "operator": "greater_than",
+         "threshold": 25
        }
      }'
 ```
@@ -168,10 +187,10 @@ Failure response (node error with partial results):
 
 The engine validates and protects each execution:
 
-- **DAG validation** — Before any node runs, a depth-first search checks for cycles using three-colour marking (white/grey/black). A back-edge to a grey node means a cycle; the workflow is rejected immediately.
+- **Graph validation** — Before any node runs, `validateGraph` checks for structural errors: duplicate node IDs, dangling edge references, and start node protection (no incoming edges). Cycles are permitted for while-loop patterns.
 - **Total timeout** — The entire execution is bounded to 60 seconds via `context.WithTimeout`.
 - **Per-node timeout** — Each node gets a 10-second child context so a slow API call cannot stall the whole workflow.
-- **Step limit** — Hard cap of 100 steps catches edge cases.
+- **Step limit** — Hard cap of 100 steps serves as the primary loop termination guard for cyclic workflows and catches runaway execution.
 - **Request tracing** — Every request gets a `X-Request-ID` header (generated or echoed from the client) for log correlation.
 - **Structured errors** — JSON responses include a machine-readable `code` field (`INVALID_ID`, `NOT_FOUND`, `INVALID_BODY`, `INTERNAL_ERROR`).
 - **Read transactions** — `GetWorkflow` runs inside a `REPEATABLE READ`, read-only transaction to guarantee a consistent snapshot across the three queries (header, nodes, edges).
@@ -194,7 +213,9 @@ api/
 │           ├── V1__create_workflow_orchestrator_system.sql  # Schema
 │           ├── V2__seed_weather_workflow.sql                # Weather workflow seed
 │           ├── V3__add_sms_and_flood_node_types.sql        # SMS + flood types
-│           └── V4__seed_flood_alert_workflow.sql            # Flood workflow seed
+│           ├── V4__seed_flood_alert_workflow.sql            # Flood workflow seed
+│           ├── V5__add_versioning_to_workflow_and_nodes.sql # Workflow snapshots
+│           └── V6__seed_weather_monitor_loop_workflow.sql   # Loop workflow seed
 └── services/
     ├── nodes/                       # Node type system
     │   ├── node.go                  # Node interface, Deps struct, New() factory
@@ -213,7 +234,7 @@ api/
         ├── service.go               # Service struct + route registration
         ├── workflow.go              # GET and POST handlers
         ├── workflow_test.go         # Handler tests (httptest)
-        ├── engine.go                # DAG execution engine
+        ├── engine.go                # Execution engine (graph validation + traversal)
         └── engine_test.go           # Engine unit tests
 
 ```
@@ -243,7 +264,9 @@ The migration files follow Flyway's versioned naming convention:
 | `V2__seed_weather_workflow.sql` | Seed: weather workflow with node library entries, instances, and edges |
 | `V3__add_sms_and_flood_node_types.sql` | Schema + seed: SMS and flood node types in `node_library` |
 | `V4__seed_flood_alert_workflow.sql` | Seed: flood alert workflow with instances and edges |
+| `V5__add_versioning_to_workflow_and_nodes.sql` | Schema: workflow snapshots for versioning |
+| `V6__seed_weather_monitor_loop_workflow.sql` | Seed: weather monitor loop workflow with back-edge |
 
-Adding a new migration is: create `V5__description.sql` in `pkg/db/migration/`, restart the stack. Flyway picks it up automatically and applies it in order.
+Adding a new migration is: create `V7__description.sql` in `pkg/db/migration/`, restart the stack. Flyway picks it up automatically and applies it in order.
 
 For architecture details and trade-offs, see the [root README](../README.md#architecture).

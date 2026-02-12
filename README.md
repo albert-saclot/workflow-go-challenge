@@ -15,13 +15,13 @@ All implementation work is in the **backend (`api/`)** and **infrastructure (`do
 
 ## 📝 Design Approach
 
-The core problem is: build a workflow engine that's extensible (new node types without changing existing code), safe (bounded execution, no infinite loops), and honest about what it doesn't do.
+The core problem is: build a workflow engine that's extensible (new node types without changing existing code), safe (bounded execution, controlled looping), and honest about what it doesn't do.
 
 **Shared Library Model** — Node definitions live in a global `node_library` table; workflows reference them via instances. I chose this over embedding definitions directly in workflows because centralised updates (e.g., changing an API endpoint) should propagate everywhere. The downside is mutation side-effects — changing a library node silently alters every workflow that uses it. A production system would need versioning or copy-on-write to prevent this, but the current schema supports the upgrade path without migration.
 
 **Interface-Driven Extensibility** — Every external dependency (weather, email, SMS, flood) is behind an interface. This isn't just for testing — it's the primary extension mechanism. After building the initial weather workflow, I added SMS and flood nodes to prove the architecture actually extends. Each required exactly four touch points: client interface + implementation, node implementation, factory case, and a DB migration seed. Zero changes to existing code. The extensibility is demonstrated, not just claimed.
 
-**Fail Before You Waste** — The engine runs a three-colour DFS to validate the graph is a DAG before executing any node. This is deliberate: an API call to Open-Meteo is irreversible (it has side-effects like rate limit consumption), and an email send is literally irreversible. Catching cycles upfront avoids wasting API calls and sending partial notifications on a graph that can never terminate. The step limit (100) is a backstop, not the primary safeguard.
+**Fail Before You Waste** — Before executing any node, the engine validates the graph structure: duplicate node IDs, dangling edge references, and start node protection. These catch real authoring errors that would cause confusing runtime failures. Cycles are intentionally allowed — they enable while-loop patterns where a condition node controls re-entry. The `maxExecutionSteps` limit (100) serves as the loop termination guard, bounding execution whether the loop exits cleanly via a condition or runs to exhaustion.
 
 **Business Errors Are Not Server Errors** — Node failures return HTTP 200 with `status: "failed"` and partial results, not 500. A weather API returning bad data is a business outcome — the engine ran correctly, a node within the workflow produced an error. This lets clients inspect completed steps for debugging and avoids conflating "the server crashed" with "the user submitted an invalid city name." That said, 422 would also be defensible for input validation failures.
 
@@ -109,37 +109,43 @@ The `sms` and `flood` node types were added specifically to validate that the ar
 
 ### Execution Engine
 
-The `executeWorkflow` function walks the workflow DAG from the start node:
+The `executeWorkflow` function walks the workflow graph from the start node:
 
 1. Constructs typed node instances from stored metadata via the factory
 2. Builds an adjacency list from edges
-3. **Validates the graph is a DAG** before executing any nodes (see below)
+3. **Validates graph structure** before executing any nodes (see below)
 4. Executes nodes sequentially, merging each node's output variables into a shared context
 5. Follows outgoing edges — for condition nodes, matches the branch result (`"true"`/`"false"`) against edge `sourceHandle` values
 
-#### Pre-execution DAG Validation
+#### Pre-execution Graph Validation
 
-Before any node runs, the engine validates the workflow graph using depth-first search with three-colour marking. Each node starts as **white** (unvisited). When the DFS enters a node it marks it **grey** (visiting). When all of a node's children are fully explored, it becomes **black** (done).
+Before any node runs, the engine calls `validateGraph` to catch structural authoring errors:
 
-If the DFS reaches a node that is already grey, that means we followed an edge back to a node we're still exploring — a cycle. The engine rejects the workflow immediately with an error, before making any API calls or side effects.
+- **Duplicate node IDs** — Two nodes with the same ID would cause ambiguous routing
+- **Dangling edge references** — Every edge source and target must reference an existing node
+- **Start node protection** — The start node must have no incoming edges (prevents loops that swallow the entry point)
+
+Cycles are **permitted** — they enable while-loop patterns where a condition node controls re-entry into the loop body. Runaway execution is bounded by `maxExecutionSteps` (100).
 
 ```
-start ──▶ A ──▶ B ──▶ end     ✓ valid DAG (all nodes go white → grey → black)
+start ──▶ form ──▶ weather ──▶ condition ──▶ end
+                       ▲           │
+                       │          true
+                       │           │
+                       └── email ◀─┘          ✓ valid loop (condition controls re-entry)
 
-start ──▶ A ──▶ B
-          ▲     │
-          └─────┘              ✗ cycle detected (B points back to grey A)
+start ──▶ A ──▶ start                        ✗ rejected (start has incoming edge)
 ```
 
-This catches malformed workflows upfront rather than wasting API calls on a graph that can never terminate.
+This catches malformed workflows upfront while still supporting intentional looping patterns.
 
 #### Safeguards
 
-- **DAG validation** — Three-colour DFS rejects cycles before execution begins
+- **Graph validation** — Structural checks (duplicate IDs, dangling edges, start node protection) reject malformed workflows before execution begins
 - **Total workflow timeout** — 60-second cap on the entire execution, enforced via `context.WithTimeout`
 - **Per-node timeout** — Each node runs under its own 10-second timeout to prevent slow API calls from blocking the workflow
 - **Context cancellation** — Checks `ctx.Err()` each iteration so client disconnects stop execution
-- **Max step limit** — Hard cap of 100 steps guards against edge cases the DFS might miss
+- **Max step limit** — Hard cap of 100 steps serves as the primary loop termination guard and catches runaway execution in cyclic workflows
 - **Partial failure results** — When a node fails, the response includes all completed steps plus the failed node with error details, returned as HTTP 200 with `status: "failed"` (not 500, since the engine itself didn't crash)
 - **Request ID tracing** — Each request gets a unique ID (or reuses the client's `X-Request-ID`) for log correlation
 - **Structured error codes** — JSON error responses include machine-readable codes (`INVALID_ID`, `NOT_FOUND`, `INTERNAL_ERROR`) so clients can distinguish between retryable and non-retryable failures
@@ -265,7 +271,7 @@ api/
 │   │   └── flood/client.go          # Open-Meteo flood API
 │   └── db/
 │       ├── postgres.go              # Connection pool config
-│       └── migration/               # Flyway SQL migrations (V1-V4)
+│       └── migration/               # Flyway SQL migrations (V1-V6)
 └── services/
     ├── nodes/
     │   ├── node.go                  # Interface, Deps, factory
@@ -284,7 +290,7 @@ api/
         ├── service.go               # Service + route registration
         ├── workflow.go              # HTTP handlers
         ├── workflow_test.go         # Handler tests
-        ├── engine.go                # DAG execution engine
+        ├── engine.go                # Execution engine (graph validation + traversal)
         └── engine_test.go           # Engine unit tests
 ```
 
@@ -301,6 +307,7 @@ api/
 | Flat variable namespace | Simple — nodes read/write to `map[string]any` | Two nodes writing the same key overwrite each other silently |
 | `REPEATABLE READ` for reads | Consistent snapshot across the 3-query GetWorkflow join | Slightly higher isolation overhead than `READ COMMITTED` |
 | Composite foreign keys on edges | DB-level prevention of cross-workflow edges | More complex schema; requires composite primary keys on instances |
+| Cycles allowed for loops | Enables while-loop patterns with condition nodes | Unconditional cycles run to `maxExecutionSteps`; no variable mutation means loops can't self-terminate yet |
 
 **On synchronous execution**: I chose this deliberately over async (job queue + polling) because the workflows are short-lived (a few API calls) and the request/response model is simpler to reason about and debug. The 60-second total timeout is the natural ceiling. If workflows needed minutes, I'd return a job ID and use WebSockets or polling — but that complexity isn't justified for the current use case.
 
@@ -313,7 +320,8 @@ api/
 ### Known Limitations
 
 - **No execution persistence** — Execution results are returned in the HTTP response but not stored. A production system would persist runs for audit and replay.
-- **No DAG validation at save time** — Cycles are caught before execution via DFS, but ideally would also be rejected when the workflow is saved.
+- **No graph validation at save time** — Structural checks (duplicate IDs, dangling edges, start node protection) run before execution, but ideally would also run when the workflow is saved.
+- **No self-terminating loops** — No node type mutates variables, so loops either exit on the first condition check or hit `maxExecutionSteps`. A counter/assignment node would fix this.
 - **Global library mutation** — Changing a library node affects all workflows. A versioning or copy-on-write mechanism would prevent unintended side effects.
 - **Save and delete are persistence-layer only (HTTP handlers out of scope)** — `UpsertWorkflow` and `DeleteWorkflow` are fully implemented and tested at the storage layer, but no HTTP endpoints expose them yet. The handlers were out of scope for this submission; the storage layer was prioritised because the three-tier data model makes persistence the complex part of these operations.
 
@@ -331,13 +339,25 @@ Ordered by impact, not by ease of implementation:
 
 2. **Observability** — OpenTelemetry spans per node execution (the engine loop is the natural instrumentation point), Prometheus counters for execution counts and latencies, and structured log correlation via the existing request ID middleware. `slog` is already in place; this is plumbing, not architecture.
 
-3. **Save-time DAG validation** — Currently cycles are caught at execution time. Validating at save time (the `UpsertWorkflow` path) would prevent users from saving broken workflows. The `validateDAG` function already exists and is decoupled from execution — it just needs to be called from the save handler.
+3. **Save-time graph validation** — Currently structural checks run at execution time. Validating at save time (the `UpsertWorkflow` path) would prevent users from saving broken workflows. The `validateGraph` function already exists and is decoupled from execution — it just needs to be called from the save handler.
 
 4. **Client-level tests** — The `pkg/clients/` HTTP clients have zero test coverage. `httptest.Server` mocks would catch timeout handling, error parsing, and malformed response edge cases that the node-level mocks don't exercise.
 
 5. **Node versioning** — Pin workflows to specific library node versions via content-addressable metadata hashing or explicit version columns. This directly addresses the shared library mutation risk. The schema change is straightforward (add a `version` column to `node_library`, reference it from instances), but the migration path for existing data needs care.
 
 6. **Parallel branch execution** — When independent branches exist in the graph (no data dependency), execute them concurrently with `errgroup`. The engine's adjacency list already supports multiple outgoing edges per node; the change is in the execution loop, not the data model.
+
+### Production Architecture
+
+Design ideas for scaling beyond the current synchronous single-process model. These are architectural directions, not planned implementations.
+
+**Sentinel Node Subtypes** — Specialized start nodes (schedule trigger, webhook/event trigger) and end nodes (report, catalyst that triggers another workflow, janitor for cleanup). Start sentinels are declarative metadata for an external orchestration layer — the node's `Execute()` is a no-op, but its metadata tells a scheduler or event router when to invoke the workflow. End sentinels can do real work inside `Execute()`: generate a report, enqueue a downstream workflow, or run cleanup logic.
+
+**Async Execution with Workers** — Move from synchronous request-scoped execution to: HTTP request enqueues job → returns job ID → worker consumes and executes → persists results. This decouples the API latency from workflow duration and is a prerequisite for everything below. The current `executeWorkflow` function becomes the worker's inner loop, unchanged.
+
+**In-Process Retries** — Node-level retry with backoff for transient failures (e.g., weather API timeout). Retry policy lives in node metadata (`maxAttempts`, `backoffMs`). Fits inside the current engine loop — the `Execute()` call gets wrapped in a retry — without requiring any infrastructure changes.
+
+**DLQ + SSE** — After retry exhaustion, failed jobs land in a dead letter queue for manual inspection or automated reprocessing. Server-Sent Events push execution status to the frontend using session correlation and idempotency keys. Only makes sense once execution is async; in the current synchronous model the HTTP response already carries the full result.
 
 ## 🚀 Quick Start
 
@@ -410,7 +430,7 @@ Tests cover three packages across 11 test files:
 | :--- | :--- | :--- |
 | `services/nodes` | `node_test.go` + 7 per-type test files | Factory, ToJSON (all 8 node types), Execute paths for every node type |
 | `services/storage` | `storage_test.go` | GetWorkflow, UpsertWorkflow, DeleteWorkflow queries with pgxmock |
-| `services/workflow` | `engine_test.go` | DAG validation, execution flow, branching, cancellation, partial failure |
+| `services/workflow` | `engine_test.go` | Graph validation, while-loop execution, branching, cancellation, partial failure |
 | `services/workflow` | `workflow_test.go` | HTTP handlers (GET, POST, 404, 400, 500) |
 
 **Why table-driven**: Every test function uses the `[]struct{ name; input; want }` pattern with `t.Run` subtests. This makes it trivial to add new cases (e.g., adding a "custom variable" condition test is one struct literal, not a new function) and produces clear output showing exactly which case failed.
