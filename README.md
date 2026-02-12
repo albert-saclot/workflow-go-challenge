@@ -341,7 +341,7 @@ Ordered by impact, not by ease of implementation:
 
 1. **Execution persistence** — Persist each run with its inputs, steps, and timing data. The `ExecutionResponse` struct is already the right shape for an `execution_runs` table. This is the highest-impact gap because without it there's no audit trail, no replay, and no way to debug failed workflows after the HTTP response is gone.
 
-2. **Observability** — OpenTelemetry spans per node execution (the engine loop is the natural instrumentation point), Prometheus counters for execution counts and latencies, and structured log correlation via the existing request ID middleware. `slog` is already in place; this is plumbing, not architecture.
+2. **Observability** — OpenTelemetry spans per node execution, Prometheus metrics, and structured log correlation. See [Observability](#observability) under Production Architecture for the full design — instrumentation points, span hierarchy, metric definitions, and the correlation gap between handler-layer request IDs and engine-layer logs.
 
 3. **Save-time graph validation** — Currently structural checks run at execution time. Validating at save time (the `UpsertWorkflow` path) would prevent users from saving broken workflows. The `validateGraph` function already exists and is decoupled from execution — it just needs to be called from the save handler.
 
@@ -409,6 +409,63 @@ The current `end` node is a no-op sentinel. These subtypes extend it with meanin
 **In-Process Retries** — Node-level retry with backoff for transient failures (e.g., weather API timeout). Retry policy lives in node metadata (`maxAttempts`, `backoffMs`). Fits inside the current engine loop — the `Execute()` call gets wrapped in a retry — without requiring any infrastructure changes.
 
 **DLQ + SSE** — After retry exhaustion, failed jobs land in a dead letter queue for manual inspection or automated reprocessing. Server-Sent Events push execution status to the frontend using session correlation and idempotency keys. Only makes sense once execution is async; in the current synchronous model the HTTP response already carries the full result.
+
+#### Observability
+
+Instrumentation design for traces, metrics, and log correlation. The codebase already has the foundation pieces in place — the gaps are correlation across layers and export infrastructure.
+
+**What exists today:**
+
+| Pillar | Status | Where |
+|--------|--------|-------|
+| Structured logging | In place | `slog.NewJSONHandler` with JSON output (`main.go:27-30`) |
+| Request ID | In place, handler-scoped | `requestIDMiddleware` generates/reuses `X-Request-ID`, stores in context (`service.go:37-47`) |
+| Per-node timing | In place | `StepResult.DurationMs` captures elapsed time per node (`engine.go:25-35`) |
+| Distributed tracing | Not present | No OpenTelemetry dependencies (`go.mod`) |
+| Metrics | Not present | No Prometheus client |
+
+The foundation is there; the gaps are **correlation** (request ID doesn't flow into engine or client logs) and **export** (timing data exists but isn't exposed as metrics).
+
+**Tracing with OpenTelemetry** — Three span layers, each nesting inside the parent:
+
+```
+[workflow.execute]                          ← workflow-level span
+  ├─ [node.execute: form]                   ← per-node span
+  ├─ [node.execute: weather]
+  │    └─ [http.client: open-meteo]         ← external call span (auto-instrumented)
+  ├─ [node.execute: condition]
+  └─ [node.execute: email]
+```
+
+- **Workflow span** — Wraps `executeWorkflow` (`engine.go:59`). Attributes: `workflow.id`, `workflow.name`, `request.id`. Created before the engine loop starts; all child spans nest under it automatically via context propagation.
+- **Per-node span** — Wraps each `node.Execute(ctx, nCtx)` call inside the engine loop (`engine.go:145-149`). Attributes: `node.id`, `node.type`, `node.label`, `node.status`, `node.duration_ms`. The timing code (`start := time.Now()`) already exists at line 145 — the span just wraps it.
+- **HTTP client spans** — `otelhttp.NewTransport()` wrapping the `http.Client` in weather and flood clients. Automatic span creation for outbound HTTP with status code, URL, and duration. No manual instrumentation needed in client code — swap the transport at construction time in `main.go`.
+
+Packages: `go.opentelemetry.io/otel`, `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp`, `go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux`.
+
+**Metrics with Prometheus** — Four metrics covering the operational questions:
+
+| Metric | Type | Labels | Question it answers |
+|--------|------|--------|---------------------|
+| `workflow_executions_total` | Counter | `workflow_id`, `status` | How often does each workflow run? What's the failure rate? |
+| `workflow_execution_duration_seconds` | Histogram | `workflow_id` | How long do workflows take end-to-end? |
+| `node_execution_duration_seconds` | Histogram | `node_type`, `status` | Which node types are slow? Which fail? |
+| `external_api_requests_total` | Counter | `service`, `status_code` | Are external APIs healthy? |
+
+Increment points map to existing code locations: workflow counter at `engine.go:189` (return with `"completed"` status), node histogram at `engine.go:149` (after `elapsed` is computed), API counter from `otelhttp` auto-instrumentation on the HTTP transport.
+
+**Structured log correlation** — The missing link. Currently `requestId` appears in handler logs via the middleware (`service.go:37-47`) but is **not propagated** into engine logs, node execution, or client calls. There's a correlation blind spot between "request arrived" and "node X called weather API."
+
+Fix: extract request ID from context in the engine loop and include it in all `slog` calls. Better: use `slog.With()` to create a child logger with `requestId` + `traceId` baked in, then pass it through the execution path. This correlates logs with traces in Grafana/Loki without changing individual log call sites.
+
+```
+Before: {"level":"DEBUG","msg":"calling weather API","url":"..."}
+After:  {"level":"DEBUG","msg":"calling weather API","url":"...","requestId":"abc-123","traceId":"def-456","nodeId":"weather-api"}
+```
+
+**Infrastructure** — OTel collector sidecar exports spans to Jaeger or Grafana Tempo. Prometheus scrapes a `/metrics` endpoint exposed by the Go process. Grafana dashboards tie traces, metrics, and logs together via `traceId` correlation. This is standard plumbing — the interesting decisions are _where spans go_ in the code, not where they're exported.
+
+**What this doesn't solve** — No business-level alerting (e.g., "workflow X hasn't run in 24 hours"), no SLO tracking, no cost attribution per workflow. These need execution persistence first (item #1 in "What I'd Build Next") to have historical data to alert against.
 
 ## 🚀 Quick Start
 
