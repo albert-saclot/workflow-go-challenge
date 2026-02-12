@@ -12,8 +12,8 @@ func ExecuteWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 	return executeWorkflow(ctx, wf, inputs, deps)
 }
 
-func ValidateDAG(storageNodes []storage.Node, adjacency map[string][]edgeTarget) (string, error) {
-	return validateDAG(storageNodes, adjacency)
+func ValidateGraph(storageNodes []storage.Node, adjacency map[string][]edgeTarget) (string, error) {
+	return validateGraph(storageNodes, adjacency)
 }
 
 func NextNode(edges []edgeTarget, branch string) string {

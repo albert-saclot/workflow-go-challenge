@@ -74,7 +74,7 @@ func TestExecuteWorkflow(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name: "cycle detected before execution",
+			name: "unconditional cycle hits max execution steps",
 			nodes: []storage.Node{
 				node("start", "start"),
 				node("a", "start"), // using start type since it's a passthrough
@@ -85,8 +85,10 @@ func TestExecuteWorkflow(t *testing.T) {
 				edge("e2", "a", "b", nil),
 				edge("e3", "b", "a", nil), // cycle: b → a
 			},
-			inputs:    map[string]any{},
-			wantError: true, // DAG validation catches this before any nodes execute
+			inputs:     map[string]any{},
+			wantStatus: "failed",
+			wantSteps:  100,
+			wantFailed: "b",
 		},
 		{
 			name: "node failure returns partial results",
@@ -161,6 +163,57 @@ func TestExecuteWorkflow(t *testing.T) {
 			wantStatus: "completed",
 			wantSteps:  3, // start, cond, no
 		},
+		{
+			name: "while-loop condition false exits immediately",
+			nodes: []storage.Node{
+				node("start", "start"),
+				{
+					ID:   "cond",
+					Type: "condition",
+					Data: storage.NodeData{
+						Label:    "Cond",
+						Metadata: json.RawMessage(`{"conditionExpression":"temperature > threshold","outputVariables":["conditionMet"]}`),
+					},
+				},
+				node("body", "start"), // passthrough loop body
+				node("end", "end"),
+			},
+			edges: []storage.Edge{
+				edge("e1", "start", "cond", nil),
+				edge("e2", "cond", "body", strPtr("true")),
+				edge("e3", "cond", "end", strPtr("false")),
+				edge("e4", "body", "cond", nil), // back-edge: loop
+			},
+			inputs:     map[string]any{"temperature": 10.0, "operator": "greater_than", "threshold": 25.0},
+			wantStatus: "completed",
+			wantSteps:  3, // start, cond, end
+		},
+		{
+			name: "while-loop always-true condition hits max steps",
+			nodes: []storage.Node{
+				node("start", "start"),
+				{
+					ID:   "cond",
+					Type: "condition",
+					Data: storage.NodeData{
+						Label:    "Cond",
+						Metadata: json.RawMessage(`{"conditionExpression":"temperature > threshold","outputVariables":["conditionMet"]}`),
+					},
+				},
+				node("body", "start"), // passthrough loop body
+				node("end", "end"),
+			},
+			edges: []storage.Edge{
+				edge("e1", "start", "cond", nil),
+				edge("e2", "cond", "body", strPtr("true")),
+				edge("e3", "cond", "end", strPtr("false")),
+				edge("e4", "body", "cond", nil), // back-edge: loop
+			},
+			inputs:     map[string]any{"temperature": 30.0, "operator": "greater_than", "threshold": 25.0},
+			wantStatus: "failed",
+			wantSteps:  100,
+			wantFailed: "body",
+		},
 	}
 
 	for _, tt := range tests {
@@ -212,7 +265,7 @@ func TestExecuteWorkflow_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestValidateDAG(t *testing.T) {
+func TestValidateGraph(t *testing.T) {
 	t.Parallel()
 
 	sn := func(id, typ string) storage.Node {
@@ -238,23 +291,23 @@ func TestValidateDAG(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:  "simple cycle is detected",
+			name:  "simple cycle is allowed",
 			nodes: []storage.Node{sn("s", "start"), sn("a", "form"), sn("b", "form")},
 			adjacency: map[string][]workflow.EdgeTarget{
 				"s": {{TargetID: "a"}},
 				"a": {{TargetID: "b"}},
 				"b": {{TargetID: "a"}},
 			},
-			wantErr: true,
+			wantStart: "s",
 		},
 		{
-			name:  "self-loop is detected",
+			name:  "self-loop is allowed",
 			nodes: []storage.Node{sn("s", "start"), sn("a", "form")},
 			adjacency: map[string][]workflow.EdgeTarget{
 				"s": {{TargetID: "a"}},
 				"a": {{TargetID: "a"}},
 			},
-			wantErr: true,
+			wantStart: "s",
 		},
 		{
 			name:  "diamond shape is valid",
@@ -287,12 +340,47 @@ func TestValidateDAG(t *testing.T) {
 			adjacency: map[string][]workflow.EdgeTarget{},
 			wantStart: "s",
 		},
+		{
+			name:  "duplicate node ID returns error",
+			nodes: []storage.Node{sn("s", "start"), sn("a", "form"), sn("a", "end")},
+			adjacency: map[string][]workflow.EdgeTarget{
+				"s": {{TargetID: "a"}},
+			},
+			wantErr: true,
+		},
+		{
+			name:  "edge references non-existent target",
+			nodes: []storage.Node{sn("s", "start"), sn("a", "form")},
+			adjacency: map[string][]workflow.EdgeTarget{
+				"s": {{TargetID: "a"}},
+				"a": {{TargetID: "ghost"}},
+			},
+			wantErr: true,
+		},
+		{
+			name:  "edge references non-existent source",
+			nodes: []storage.Node{sn("s", "start"), sn("a", "form")},
+			adjacency: map[string][]workflow.EdgeTarget{
+				"s":     {{TargetID: "a"}},
+				"ghost": {{TargetID: "a"}},
+			},
+			wantErr: true,
+		},
+		{
+			name:  "incoming edge to start node returns error",
+			nodes: []storage.Node{sn("s", "start"), sn("a", "form")},
+			adjacency: map[string][]workflow.EdgeTarget{
+				"s": {{TargetID: "a"}},
+				"a": {{TargetID: "s"}},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := workflow.ValidateDAG(tt.nodes, tt.adjacency)
+			got, err := workflow.ValidateGraph(tt.nodes, tt.adjacency)
 
 			if tt.wantErr {
 				if err == nil {

@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	// maxExecutionSteps is a safeguard against malformed workflows.
+	// maxExecutionSteps is a safeguard against malformed workflows and loop termination.
 	maxExecutionSteps = 100
 
 	// nodeTimeout limits how long a single node can execute.
@@ -93,9 +93,10 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 	}
 
 	// 3. Validate the graph structure before executing any nodes.
-	// This catches cycles and missing start nodes upfront, avoiding
-	// wasted API calls on malformed workflows.
-	startID, err := validateDAG(wf.Nodes, adjacency)
+	// This catches missing start nodes upfront, avoiding wasted API calls
+	// on malformed workflows. Cycles are allowed for while-loop patterns
+	// and bounded by maxExecutionSteps.
+	startID, err := validateGraph(wf.Nodes, adjacency)
 	if err != nil {
 		return nil, err
 	}
@@ -191,48 +192,40 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 	}, nil
 }
 
-// validateDAG checks that the workflow graph is a valid DAG before execution.
-// Returns the start node ID, or an error if the graph has no start node or
-// contains cycles. Uses DFS with three-color marking (unvisited/visiting/done).
-func validateDAG(storageNodes []storage.Node, adjacency map[string][]edgeTarget) (string, error) {
+// validateGraph checks the workflow graph for structural problems before execution.
+// Cycles are permitted for while-loop patterns; runaway execution is bounded by maxExecutionSteps.
+func validateGraph(storageNodes []storage.Node, adjacency map[string][]edgeTarget) (string, error) {
+	nodeIDs := make(map[string]bool, len(storageNodes))
 	var startID string
+
 	for _, n := range storageNodes {
-		if n.Type == "start" {
+		if nodeIDs[n.ID] {
+			return "", fmt.Errorf("duplicate node ID %q", n.ID)
+		}
+		nodeIDs[n.ID] = true
+		if n.Type == "start" && startID == "" {
 			startID = n.ID
-			break
 		}
 	}
 	if startID == "" {
 		return "", fmt.Errorf("workflow has no start node")
 	}
 
-	const (
-		unvisited = 0
-		visiting  = 1
-		done      = 2
-	)
-	state := make(map[string]int)
-
-	var dfs func(string) error
-	dfs = func(id string) error {
-		state[id] = visiting
-		for _, e := range adjacency[id] {
-			switch state[e.TargetID] {
-			case visiting:
-				return fmt.Errorf("cycle detected at node %q", e.TargetID)
-			case unvisited:
-				if err := dfs(e.TargetID); err != nil {
-					return err
-				}
+	// Check all edge targets/sources reference existing nodes, and start has no incoming edges.
+	for sourceID, edges := range adjacency {
+		if !nodeIDs[sourceID] {
+			return "", fmt.Errorf("edge references non-existent source node %q", sourceID)
+		}
+		for _, e := range edges {
+			if !nodeIDs[e.TargetID] {
+				return "", fmt.Errorf("edge references non-existent target node %q", e.TargetID)
+			}
+			if e.TargetID == startID {
+				return "", fmt.Errorf("start node %q must not have incoming edges", startID)
 			}
 		}
-		state[id] = done
-		return nil
 	}
 
-	if err := dfs(startID); err != nil {
-		return "", err
-	}
 	return startID, nil
 }
 
