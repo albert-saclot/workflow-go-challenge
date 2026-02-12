@@ -13,7 +13,7 @@ import (
 // WeatherNode calls an external API based on its metadata configuration.
 // Raw metadata is preserved for ToJSON(); parsed fields are used by Execute().
 type WeatherNode struct {
-	base    BaseFields
+	BaseFields
 	weather weather.Client
 
 	// Parsed from metadata for execution
@@ -33,26 +33,11 @@ type CityOption struct {
 // Metadata is parsed into typed fields for Execute(), while the raw
 // bytes are kept on base for lossless ToJSON() passthrough.
 func NewWeatherNode(base BaseFields, weatherClient weather.Client) (*WeatherNode, error) {
-	n := &WeatherNode{base: base, weather: weatherClient}
+	n := &WeatherNode{BaseFields: base, weather: weatherClient}
 	if err := json.Unmarshal(base.Metadata, n); err != nil {
 		return nil, fmt.Errorf("invalid integration metadata: %w", err)
 	}
 	return n, nil
-}
-
-// ToJSON returns the React Flow representation.
-// Metadata is the raw DB value — no reconstruction, no data loss.
-func (n *WeatherNode) ToJSON() NodeJSON {
-	return NodeJSON{
-		ID:       n.base.ID,
-		Type:     n.base.NodeType,
-		Position: n.base.Position,
-		Data: NodeData{
-			Label:       n.base.Label,
-			Description: n.base.Description,
-			Metadata:    n.base.Metadata,
-		},
-	}
 }
 
 // Execute resolves the city from context, looks up coordinates,

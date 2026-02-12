@@ -14,7 +14,7 @@ import (
 // Follows the same pattern as WeatherNode — resolves city from context,
 // looks up coordinates, and delegates the API call to the client.
 type FloodNode struct {
-	base  BaseFields
+	BaseFields
 	flood flood.Client
 
 	APIEndpoint     string       `json:"apiEndpoint"`
@@ -24,24 +24,11 @@ type FloodNode struct {
 }
 
 func NewFloodNode(base BaseFields, floodClient flood.Client) (*FloodNode, error) {
-	n := &FloodNode{base: base, flood: floodClient}
+	n := &FloodNode{BaseFields: base, flood: floodClient}
 	if err := json.Unmarshal(base.Metadata, n); err != nil {
 		return nil, fmt.Errorf("invalid flood metadata: %w", err)
 	}
 	return n, nil
-}
-
-func (n *FloodNode) ToJSON() NodeJSON {
-	return NodeJSON{
-		ID:       n.base.ID,
-		Type:     n.base.NodeType,
-		Position: n.base.Position,
-		Data: NodeData{
-			Label:       n.base.Label,
-			Description: n.base.Description,
-			Metadata:    n.base.Metadata,
-		},
-	}
 }
 
 func (n *FloodNode) Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error) {

@@ -48,6 +48,7 @@ type NodeJSON struct {
 
 // BaseFields holds the instance-level data that every node type shares.
 // These come from the workflow_node_instances + node_library join.
+// Embedding BaseFields provides a default ToJSON() to all node types.
 type BaseFields struct {
 	ID          string
 	NodeType    string
@@ -55,6 +56,21 @@ type BaseFields struct {
 	Label       string
 	Description string
 	Metadata    json.RawMessage // raw DB metadata, preserved for ToJSON()
+}
+
+// ToJSON returns the React Flow representation shared by all node types.
+// Node types that embed BaseFields inherit this; override if custom serialization is needed.
+func (b *BaseFields) ToJSON() NodeJSON {
+	return NodeJSON{
+		ID:       b.ID,
+		Type:     b.NodeType,
+		Position: b.Position,
+		Data: NodeData{
+			Label:       b.Label,
+			Description: b.Description,
+			Metadata:    b.Metadata,
+		},
+	}
 }
 
 // Node is implemented by each node type. A node constructs itself from

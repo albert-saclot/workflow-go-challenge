@@ -13,7 +13,7 @@ import (
 // Variable placeholders like {{city}} in the template are resolved from
 // the runtime context. The actual send is delegated to the email client.
 type EmailNode struct {
-	base  BaseFields
+	BaseFields
 	email email.Client
 
 	InputVariables  []string      `json:"inputVariables"`
@@ -27,24 +27,11 @@ type EmailTemplate struct {
 }
 
 func NewEmailNode(base BaseFields, emailClient email.Client) (*EmailNode, error) {
-	n := &EmailNode{base: base, email: emailClient}
+	n := &EmailNode{BaseFields: base, email: emailClient}
 	if err := json.Unmarshal(base.Metadata, n); err != nil {
 		return nil, fmt.Errorf("invalid email metadata: %w", err)
 	}
 	return n, nil
-}
-
-func (n *EmailNode) ToJSON() NodeJSON {
-	return NodeJSON{
-		ID:       n.base.ID,
-		Type:     n.base.NodeType,
-		Position: n.base.Position,
-		Data: NodeData{
-			Label:       n.base.Label,
-			Description: n.base.Description,
-			Metadata:    n.base.Metadata,
-		},
-	}
 }
 
 // Execute resolves template placeholders from context variables and

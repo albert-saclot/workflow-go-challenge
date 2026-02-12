@@ -21,31 +21,18 @@ const (
 // It outputs conditionMet (bool) and sets Branch to "true" or "false",
 // which the execution engine uses to follow the correct outgoing edge.
 type ConditionNode struct {
-	base BaseFields
+	BaseFields
 
-	ConditionVariable string `json:"conditionVariable"`
-	OutputVariables     []string `json:"outputVariables"`
+	ConditionVariable string   `json:"conditionVariable"`
+	OutputVariables   []string `json:"outputVariables"`
 }
 
 func NewConditionNode(base BaseFields) (*ConditionNode, error) {
-	n := &ConditionNode{base: base}
+	n := &ConditionNode{BaseFields: base}
 	if err := json.Unmarshal(base.Metadata, n); err != nil {
 		return nil, fmt.Errorf("invalid condition metadata: %w", err)
 	}
 	return n, nil
-}
-
-func (n *ConditionNode) ToJSON() NodeJSON {
-	return NodeJSON{
-		ID:       n.base.ID,
-		Type:     n.base.NodeType,
-		Position: n.base.Position,
-		Data: NodeData{
-			Label:       n.base.Label,
-			Description: n.base.Description,
-			Metadata:    n.base.Metadata,
-		},
-	}
 }
 
 // Execute evaluates the condition using operator and threshold from context.

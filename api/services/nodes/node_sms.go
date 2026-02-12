@@ -11,32 +11,19 @@ import (
 // SmsNode sends an SMS notification using the runtime context variables.
 // The message body is composed from the context, then sent via the SMS client.
 type SmsNode struct {
-	base BaseFields
-	sms  sms.Client
+	BaseFields
+	sms sms.Client
 
 	InputVariables  []string `json:"inputVariables"`
 	OutputVariables []string `json:"outputVariables"`
 }
 
 func NewSmsNode(base BaseFields, smsClient sms.Client) (*SmsNode, error) {
-	n := &SmsNode{base: base, sms: smsClient}
+	n := &SmsNode{BaseFields: base, sms: smsClient}
 	if err := json.Unmarshal(base.Metadata, n); err != nil {
 		return nil, fmt.Errorf("invalid sms metadata: %w", err)
 	}
 	return n, nil
-}
-
-func (n *SmsNode) ToJSON() NodeJSON {
-	return NodeJSON{
-		ID:       n.base.ID,
-		Type:     n.base.NodeType,
-		Position: n.base.Position,
-		Data: NodeData{
-			Label:       n.base.Label,
-			Description: n.base.Description,
-			Metadata:    n.base.Metadata,
-		},
-	}
 }
 
 func (n *SmsNode) Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error) {

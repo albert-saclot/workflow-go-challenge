@@ -11,31 +11,18 @@ import (
 // During execution, it reads the expected fields from the runtime context
 // (pre-populated from the execute request payload).
 type FormNode struct {
-	base BaseFields
+	BaseFields
 
 	InputFields     []string `json:"inputFields"`
 	OutputVariables []string `json:"outputVariables"`
 }
 
 func NewFormNode(base BaseFields) (*FormNode, error) {
-	n := &FormNode{base: base}
+	n := &FormNode{BaseFields: base}
 	if err := json.Unmarshal(base.Metadata, n); err != nil {
 		return nil, fmt.Errorf("invalid form metadata: %w", err)
 	}
 	return n, nil
-}
-
-func (n *FormNode) ToJSON() NodeJSON {
-	return NodeJSON{
-		ID:       n.base.ID,
-		Type:     n.base.NodeType,
-		Position: n.base.Position,
-		Data: NodeData{
-			Label:       n.base.Label,
-			Description: n.base.Description,
-			Metadata:    n.base.Metadata,
-		},
-	}
 }
 
 // Execute extracts the declared input fields from the runtime context
