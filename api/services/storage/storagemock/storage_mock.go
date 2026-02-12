@@ -3,15 +3,19 @@ package storagemock
 import (
 	"context"
 	"encoding/json"
+	"time"
 	"workflow-code-test/api/services/storage"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type StorageMock struct {
-	GetWorkflowMock    func(ctx context.Context, id uuid.UUID) (*storage.Workflow, error)
-	UpsertWorkflowMock func(ctx context.Context, wf *storage.Workflow) error
-	DeleteWorkflowMock func(ctx context.Context, id uuid.UUID) error
+	GetWorkflowMock      func(ctx context.Context, id uuid.UUID) (*storage.Workflow, error)
+	UpsertWorkflowMock   func(ctx context.Context, wf *storage.Workflow) error
+	DeleteWorkflowMock   func(ctx context.Context, id uuid.UUID) error
+	PublishWorkflowMock  func(ctx context.Context, id uuid.UUID) (*storage.WorkflowSnapshot, error)
+	GetActiveSnapshotMock func(ctx context.Context, workflowID uuid.UUID) (*storage.WorkflowSnapshot, error)
 }
 
 func (m *StorageMock) GetWorkflow(ctx context.Context, wfUUID uuid.UUID) (*storage.Workflow, error) {
@@ -50,4 +54,26 @@ func (m *StorageMock) DeleteWorkflow(ctx context.Context, wfUUID uuid.UUID) erro
 		return m.DeleteWorkflowMock(ctx, wfUUID)
 	}
 	return nil
+}
+
+func (m *StorageMock) PublishWorkflow(ctx context.Context, id uuid.UUID) (*storage.WorkflowSnapshot, error) {
+	if m != nil && m.PublishWorkflowMock != nil {
+		return m.PublishWorkflowMock(ctx, id)
+	}
+	snapID := uuid.New()
+	return &storage.WorkflowSnapshot{
+		ID:            snapID,
+		WorkflowID:    id,
+		VersionNumber: 1,
+		DagData:       storage.DagData{Nodes: []storage.Node{}, Edges: []storage.Edge{}},
+		PublishedAt:   time.Now(),
+	}, nil
+}
+
+func (m *StorageMock) GetActiveSnapshot(ctx context.Context, workflowID uuid.UUID) (*storage.WorkflowSnapshot, error) {
+	if m != nil && m.GetActiveSnapshotMock != nil {
+		return m.GetActiveSnapshotMock(ctx, workflowID)
+	}
+	// Default: no snapshot (draft workflow) — existing execute tests fall through to GetWorkflow
+	return nil, pgx.ErrNoRows
 }

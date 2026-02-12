@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -18,6 +19,13 @@ type DB interface {
 	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
 }
 
+// querier is satisfied by both pgx.Tx and pgxpool.Pool, allowing
+// hydration helpers to work inside or outside transactions.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // pgStorage implements the Storage interface using PostgreSQL.
 type pgStorage struct {
 	DB DB
@@ -30,6 +38,8 @@ type Storage interface {
 	GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, error)
 	UpsertWorkflow(ctx context.Context, wf *Workflow) error
 	DeleteWorkflow(ctx context.Context, id uuid.UUID) error
+	PublishWorkflow(ctx context.Context, id uuid.UUID) (*WorkflowSnapshot, error)
+	GetActiveSnapshot(ctx context.Context, workflowID uuid.UUID) (*WorkflowSnapshot, error)
 }
 
 // NewInstance creates a new PostgreSQL-backed Storage implementation.
@@ -38,6 +48,85 @@ func NewInstance(db *pgxpool.Pool) (Storage, error) {
 		return nil, fmt.Errorf("repository: db connection cannot be nil")
 	}
 	return &pgStorage{DB: db}, nil
+}
+
+// hydrateNodes fetches workflow nodes by joining instance positions with library blueprints.
+func hydrateNodes(ctx context.Context, q querier, workflowID uuid.UUID) ([]Node, error) {
+	rows, err := q.Query(ctx, `
+        SELECT
+            i.instance_id,
+            l.node_type,
+            i.x_pos, i.y_pos,
+            l.base_label as label,
+            l.base_description,
+            l.metadata
+        FROM workflow_node_instances i
+        JOIN node_library l ON i.node_library_id = l.id
+        WHERE i.workflow_id = $1 AND l.deleted_at IS NULL`,
+		workflowID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var nodes []Node
+	for rows.Next() {
+		var n Node
+		err := rows.Scan(
+			&n.ID,
+			&n.Type,
+			&n.Position.X, &n.Position.Y,
+			&n.Data.Label,
+			&n.Data.Description,
+			&n.Data.Metadata,
+		)
+		if err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
+
+// hydrateEdges fetches workflow edges with their visual properties.
+func hydrateEdges(ctx context.Context, q querier, workflowID uuid.UUID) ([]Edge, error) {
+	rows, err := q.Query(ctx, `
+        SELECT edge_id, source_instance_id, target_instance_id, source_handle,
+               edge_type, animated, label, style_props, label_style
+        FROM workflow_edges
+        WHERE workflow_id = $1`,
+		workflowID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		err := rows.Scan(
+			&e.ID,
+			&e.Source,
+			&e.Target,
+			&e.SourceHandle,
+			&e.Type,
+			&e.Animated,
+			&e.Label,
+			&e.Style,
+			&e.LabelStyle,
+		)
+		if err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return edges, nil
 }
 
 // GetWorkflow retrieves a complete workflow by ID, hydrating it from three tables:
@@ -70,87 +159,31 @@ func (r *pgStorage) GetWorkflow(ctx context.Context, id uuid.UUID) (*Workflow, e
 
 	// 1. Fetch workflow header, respecting soft-deletion.
 	err = tx.QueryRow(timeoutCtx, `
-        SELECT name, created_at, modified_at
+        SELECT name, status, active_snapshot_id, created_at, modified_at
         FROM workflows
         WHERE id = $1 AND deleted_at IS NULL`,
-		id).Scan(&wf.Name, &wf.CreatedAt, &wf.ModifiedAt)
+		id).Scan(&wf.Name, &wf.Status, &wf.ActiveSnapshotID, &wf.CreatedAt, &wf.ModifiedAt)
 
 	if err != nil {
 		return nil, err // pgx.ErrNoRows if not found
 	}
 
 	// 2. Hydrate nodes by joining instance positions with library blueprints.
-	// Each node instance on the canvas references a node_library entry that holds
-	// the reusable logic (type, label, description, metadata).
-	nodeRows, err := tx.Query(timeoutCtx, `
-        SELECT
-            i.instance_id,
-            l.node_type,
-            i.x_pos, i.y_pos,
-            l.base_label as label,
-            l.base_description,
-            l.metadata
-        FROM workflow_node_instances i
-        JOIN node_library l ON i.node_library_id = l.id
-        WHERE i.workflow_id = $1 AND l.deleted_at IS NULL`,
-		id)
+	nodes, err := hydrateNodes(timeoutCtx, tx, id)
 	if err != nil {
 		return nil, err
 	}
-	defer nodeRows.Close()
-
-	for nodeRows.Next() {
-		var n Node
-		err := nodeRows.Scan(
-			&n.ID,
-			&n.Type,
-			&n.Position.X, &n.Position.Y,
-			&n.Data.Label,
-			&n.Data.Description,
-			&n.Data.Metadata,
-		)
-		if err != nil {
-			return nil, err
-		}
-		wf.Nodes = append(wf.Nodes, n)
-	}
-	if err := nodeRows.Err(); err != nil {
-		return nil, err
+	if nodes != nil {
+		wf.Nodes = nodes
 	}
 
-	// 3. Fetch edges with their visual properties (animation, labels, styling).
-	// source_handle is used by condition nodes to distinguish true/false branches.
-	edgeRows, err := tx.Query(timeoutCtx, `
-        SELECT edge_id, source_instance_id, target_instance_id, source_handle,
-               edge_type, animated, label, style_props, label_style
-        FROM workflow_edges
-        WHERE workflow_id = $1`,
-		id)
+	// 3. Fetch edges with their visual properties.
+	edges, err := hydrateEdges(timeoutCtx, tx, id)
 	if err != nil {
 		return nil, err
 	}
-	defer edgeRows.Close()
-
-	for edgeRows.Next() {
-		var e Edge
-		err := edgeRows.Scan(
-			&e.ID,
-			&e.Source,
-			&e.Target,
-			&e.SourceHandle,
-			&e.Type,
-			&e.Animated,
-			&e.Label,
-			&e.Style,
-			&e.LabelStyle,
-		)
-		if err != nil {
-			return nil, err
-		}
-		wf.Edges = append(wf.Edges, e)
-	}
-	if err := edgeRows.Err(); err != nil {
-		return nil, err
+	if edges != nil {
+		wf.Edges = edges
 	}
 
 	return wf, tx.Commit(timeoutCtx)
@@ -319,4 +352,122 @@ func (r *pgStorage) DeleteWorkflow(ctx context.Context, id uuid.UUID) error {
 	}
 
 	return tx.Commit(timeoutCtx)
+}
+
+// PublishWorkflow creates an immutable snapshot of the workflow's current DAG
+// within a REPEATABLE READ transaction. The snapshot freezes nodes and edges
+// so that future execution is decoupled from live node_library changes.
+func (r *pgStorage) PublishWorkflow(ctx context.Context, id uuid.UUID) (*WorkflowSnapshot, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tx, err := r.DB.BeginTx(timeoutCtx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction for publish: %w", err)
+	}
+	defer tx.Rollback(timeoutCtx)
+
+	// 1. Verify workflow exists and is not deleted.
+	var name string
+	err = tx.QueryRow(timeoutCtx, `
+        SELECT name FROM workflows
+        WHERE id = $1 AND deleted_at IS NULL`,
+		id).Scan(&name)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Hydrate current nodes and edges.
+	nodes, err := hydrateNodes(timeoutCtx, tx, id)
+	if err != nil {
+		return nil, fmt.Errorf("hydrate nodes for publish: %w", err)
+	}
+
+	edges, err := hydrateEdges(timeoutCtx, tx, id)
+	if err != nil {
+		return nil, fmt.Errorf("hydrate edges for publish: %w", err)
+	}
+
+	// 3. Marshal the DAG into JSON.
+	dagData := DagData{Nodes: nodes, Edges: edges}
+	if dagData.Nodes == nil {
+		dagData.Nodes = []Node{}
+	}
+	if dagData.Edges == nil {
+		dagData.Edges = []Edge{}
+	}
+	dagJSON, err := json.Marshal(dagData)
+	if err != nil {
+		return nil, fmt.Errorf("marshal dag data: %w", err)
+	}
+
+	// 4. Determine next version number.
+	var nextVersion int
+	err = tx.QueryRow(timeoutCtx, `
+        SELECT COALESCE(MAX(version_number), 0) + 1
+        FROM workflow_snapshots
+        WHERE workflow_id = $1`,
+		id).Scan(&nextVersion)
+	if err != nil {
+		return nil, fmt.Errorf("get next version: %w", err)
+	}
+
+	// 5. Insert the snapshot.
+	snap := &WorkflowSnapshot{
+		WorkflowID:    id,
+		VersionNumber: nextVersion,
+		DagData:       dagData,
+	}
+	err = tx.QueryRow(timeoutCtx, `
+        INSERT INTO workflow_snapshots (workflow_id, version_number, dag_data)
+        VALUES ($1, $2, $3)
+        RETURNING id, published_at`,
+		id, nextVersion, dagJSON).Scan(&snap.ID, &snap.PublishedAt)
+	if err != nil {
+		return nil, fmt.Errorf("insert snapshot: %w", err)
+	}
+
+	// 6. Update workflow status and active snapshot pointer.
+	_, err = tx.Exec(timeoutCtx, `
+        UPDATE workflows
+        SET status = 'published', active_snapshot_id = $1
+        WHERE id = $2`,
+		snap.ID, id)
+	if err != nil {
+		return nil, fmt.Errorf("update workflow status: %w", err)
+	}
+
+	if err := tx.Commit(timeoutCtx); err != nil {
+		return nil, fmt.Errorf("commit publish: %w", err)
+	}
+
+	return snap, nil
+}
+
+// GetActiveSnapshot retrieves the currently active snapshot for a workflow.
+// Returns pgx.ErrNoRows if the workflow has no active snapshot (i.e. is a draft).
+func (r *pgStorage) GetActiveSnapshot(ctx context.Context, workflowID uuid.UUID) (*WorkflowSnapshot, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	snap := &WorkflowSnapshot{}
+	var dagJSON []byte
+
+	err := r.DB.QueryRow(timeoutCtx, `
+        SELECT s.id, s.workflow_id, s.version_number, s.dag_data, s.published_at
+        FROM workflow_snapshots s
+        JOIN workflows w ON w.active_snapshot_id = s.id
+        WHERE w.id = $1 AND w.deleted_at IS NULL`,
+		workflowID).Scan(&snap.ID, &snap.WorkflowID, &snap.VersionNumber, &dagJSON, &snap.PublishedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := json.Unmarshal(dagJSON, &snap.DagData); err != nil {
+		return nil, fmt.Errorf("unmarshal snapshot dag_data: %w", err)
+	}
+
+	return snap, nil
 }

@@ -62,5 +62,5 @@ func (s *Service) LoadRoutes(parentRouter *mux.Router) {
 
 	router.HandleFunc("/{id}", s.HandleGetWorkflow).Methods("GET")
 	router.HandleFunc("/{id}/execute", s.HandleExecuteWorkflow).Methods("POST")
-
+	router.HandleFunc("/{id}/publish", s.HandlePublishWorkflow).Methods("POST")
 }

@@ -70,8 +70,55 @@ func (s *Service) HandleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandlePublishWorkflow creates an immutable snapshot of the workflow's current
+// DAG. Subsequent executions will run against this frozen snapshot rather than
+// live tables, decoupling execution from node_library mutations.
+func (s *Service) HandlePublishWorkflow(w http.ResponseWriter, r *http.Request) {
+	rid := reqID(r)
+	id := mux.Vars(r)["id"]
+	slog.Debug("publishing workflow", "id", id, "requestId", rid)
+
+	wfUUID, err := uuid.Parse(id)
+	if err != nil {
+		slog.Warn("invalid workflow id", "id", id, "requestId", rid, "error", err)
+		writeErrorJSON(w, "INVALID_ID", "invalid workflow id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	snap, err := s.storage.PublishWorkflow(ctx, wfUUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("workflow not found for publish", "id", wfUUID, "requestId", rid)
+			writeErrorJSON(w, "NOT_FOUND", "workflow not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to publish workflow", "id", wfUUID, "requestId", rid, "error", err)
+		writeErrorJSON(w, "INTERNAL_ERROR", "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"snapshotId":    snap.ID,
+		"versionNumber": snap.VersionNumber,
+		"publishedAt":   snap.PublishedAt,
+	})
+	if err != nil {
+		slog.Error("failed to marshal publish response", "id", wfUUID, "requestId", rid, "error", err)
+		writeErrorJSON(w, "INTERNAL_ERROR", "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(payload); err != nil {
+		slog.Error("failed to write response", "id", wfUUID, "requestId", rid, "error", err)
+	}
+}
+
 // HandleExecuteWorkflow loads a workflow from the database, parses the input
 // variables from the request body, and executes the workflow graph end-to-end.
+// If the workflow has a published snapshot, execution runs against the frozen
+// snapshot. Otherwise it falls back to live tables (backward compat for drafts).
 // Execution failures (node errors, cycles) are returned as 200 with
 // status "failed" and partial results — they are business-level outcomes,
 // not server errors.
@@ -112,16 +159,37 @@ func (s *Service) HandleExecuteWorkflow(w http.ResponseWriter, r *http.Request) 
 	}
 
 	ctx := r.Context()
-	wf, err := s.storage.GetWorkflow(ctx, wfUUID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			slog.Warn("workflow not found", "id", wfUUID, "requestId", rid)
-			writeErrorJSON(w, "NOT_FOUND", "workflow not found", http.StatusNotFound)
-			return
-		}
-		slog.Error("failed to get workflow", "id", wfUUID, "requestId", rid, "error", err)
+
+	// Prefer executing from a published snapshot if one exists.
+	// This decouples execution from live node_library mutations.
+	var wf *storage.Workflow
+	snapshot, err := s.storage.GetActiveSnapshot(ctx, wfUUID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		slog.Error("failed to get active snapshot", "id", wfUUID, "requestId", rid, "error", err)
 		writeErrorJSON(w, "INTERNAL_ERROR", "internal server error", http.StatusInternalServerError)
 		return
+	}
+
+	if snapshot != nil {
+		slog.Debug("executing from snapshot", "id", wfUUID, "version", snapshot.VersionNumber, "requestId", rid)
+		wf = &storage.Workflow{
+			ID:    wfUUID,
+			Nodes: snapshot.DagData.Nodes,
+			Edges: snapshot.DagData.Edges,
+		}
+	} else {
+		// No snapshot — fall back to live tables (backward compat for drafts)
+		wf, err = s.storage.GetWorkflow(ctx, wfUUID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				slog.Warn("workflow not found", "id", wfUUID, "requestId", rid)
+				writeErrorJSON(w, "NOT_FOUND", "workflow not found", http.StatusNotFound)
+				return
+			}
+			slog.Error("failed to get workflow", "id", wfUUID, "requestId", rid, "error", err)
+			writeErrorJSON(w, "INTERNAL_ERROR", "internal server error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	executedAt := time.Now().Format(time.RFC3339)

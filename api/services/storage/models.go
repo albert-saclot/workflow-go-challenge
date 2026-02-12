@@ -11,13 +11,31 @@ import (
 // It aggregates hydrated nodes and edges after the storage layer
 // joins instance data with the shared node library.
 type Workflow struct {
-	ID         uuid.UUID  `json:"id" db:"id"`
-	Name       string     `json:"name" db:"name"`
-	Nodes      []Node     `json:"nodes" db:"-"`
-	Edges      []Edge     `json:"edges" db:"-"`
-	CreatedAt  time.Time  `json:"createdAt" db:"created_at"`
-	ModifiedAt time.Time  `json:"modifiedAt" db:"modified_at"`
-	DeletedAt  *time.Time `json:"deletedAt,omitempty" db:"deleted_at"`
+	ID               uuid.UUID  `json:"id" db:"id"`
+	Name             string     `json:"name" db:"name"`
+	Status           string     `json:"status" db:"status"`
+	ActiveSnapshotID *uuid.UUID `json:"activeSnapshotId,omitempty" db:"active_snapshot_id"`
+	Nodes            []Node     `json:"nodes" db:"-"`
+	Edges            []Edge     `json:"edges" db:"-"`
+	CreatedAt        time.Time  `json:"createdAt" db:"created_at"`
+	ModifiedAt       time.Time  `json:"modifiedAt" db:"modified_at"`
+	DeletedAt        *time.Time `json:"deletedAt,omitempty" db:"deleted_at"`
+}
+
+// DagData holds the frozen state of a workflow's nodes and edges at publish time.
+type DagData struct {
+	Nodes []Node `json:"nodes"`
+	Edges []Edge `json:"edges"`
+}
+
+// WorkflowSnapshot is an immutable, versioned capture of a workflow's DAG.
+// Execution of published workflows reads from the snapshot, not live tables.
+type WorkflowSnapshot struct {
+	ID            uuid.UUID `json:"id"`
+	WorkflowID    uuid.UUID `json:"workflowId"`
+	VersionNumber int       `json:"versionNumber"`
+	DagData       DagData   `json:"dagData"`
+	PublishedAt   time.Time `json:"publishedAt"`
 }
 
 // ToFrontend returns only the fields React Flow needs: id, nodes, edges.

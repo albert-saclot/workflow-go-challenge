@@ -26,11 +26,11 @@ func setupSuccessMock(mock pgxmock.PgxPoolIface) {
 		AccessMode: pgx.ReadOnly,
 	})
 
-	mock.ExpectQuery("SELECT name, created_at, modified_at").
+	mock.ExpectQuery("SELECT name, status, active_snapshot_id, created_at, modified_at").
 		WithArgs(testWfID).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"name", "created_at", "modified_at"}).
-				AddRow("Weather Check System", testNow, testNow),
+			pgxmock.NewRows([]string{"name", "status", "active_snapshot_id", "created_at", "modified_at"}).
+				AddRow("Weather Check System", "draft", nil, testNow, testNow),
 		)
 
 	nodeMetadata := json.RawMessage(`{"hasHandles":{"source":true,"target":false}}`)
@@ -73,6 +73,14 @@ func TestGetWorkflow(t *testing.T) {
 
 				if wf.Name != "Weather Check System" {
 					t.Errorf("expected name 'Weather Check System', got %q", wf.Name)
+				}
+
+				if wf.Status != "draft" {
+					t.Errorf("expected status 'draft', got %q", wf.Status)
+				}
+
+				if wf.ActiveSnapshotID != nil {
+					t.Errorf("expected nil active snapshot ID, got %v", wf.ActiveSnapshotID)
 				}
 
 				// Verify node hydration from library join
@@ -119,7 +127,7 @@ func TestGetWorkflow(t *testing.T) {
 					IsoLevel:   pgx.RepeatableRead,
 					AccessMode: pgx.ReadOnly,
 				})
-				mock.ExpectQuery("SELECT name, created_at, modified_at").
+				mock.ExpectQuery("SELECT name, status, active_snapshot_id, created_at, modified_at").
 					WithArgs(testWfID).
 					WillReturnError(pgx.ErrNoRows)
 				mock.ExpectRollback()
@@ -134,11 +142,11 @@ func TestGetWorkflow(t *testing.T) {
 					AccessMode: pgx.ReadOnly,
 				})
 				// Header succeeds
-				mock.ExpectQuery("SELECT name, created_at, modified_at").
+				mock.ExpectQuery("SELECT name, status, active_snapshot_id, created_at, modified_at").
 					WithArgs(testWfID).
 					WillReturnRows(
-						pgxmock.NewRows([]string{"name", "created_at", "modified_at"}).
-							AddRow("Test", testNow, testNow),
+						pgxmock.NewRows([]string{"name", "status", "active_snapshot_id", "created_at", "modified_at"}).
+							AddRow("Test", "draft", nil, testNow, testNow),
 					)
 				// Node query fails
 				mock.ExpectQuery("SELECT").
@@ -156,11 +164,11 @@ func TestGetWorkflow(t *testing.T) {
 					AccessMode: pgx.ReadOnly,
 				})
 				// Header succeeds
-				mock.ExpectQuery("SELECT name, created_at, modified_at").
+				mock.ExpectQuery("SELECT name, status, active_snapshot_id, created_at, modified_at").
 					WithArgs(testWfID).
 					WillReturnRows(
-						pgxmock.NewRows([]string{"name", "created_at", "modified_at"}).
-							AddRow("Test", testNow, testNow),
+						pgxmock.NewRows([]string{"name", "status", "active_snapshot_id", "created_at", "modified_at"}).
+							AddRow("Test", "draft", nil, testNow, testNow),
 					)
 				// Node query succeeds with empty results
 				mock.ExpectQuery("SELECT").
@@ -550,6 +558,162 @@ func TestDeleteWorkflow(t *testing.T) {
 
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet mock expectations: %v", err)
+			}
+		})
+	}
+}
+
+func TestPublishWorkflow(t *testing.T) {
+	t.Parallel()
+
+	snapID := uuid.MustParse("660e8400-e29b-41d4-a716-446655440000")
+	nodeMetadata := json.RawMessage(`{"hasHandles":{"source":true,"target":false}}`)
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		wantErr   string
+		checkSnap func(t *testing.T, snap *storage.WorkflowSnapshot)
+	}{
+		{
+			name: "successfully publishes workflow",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBeginTx(pgx.TxOptions{
+					IsoLevel: pgx.RepeatableRead,
+				})
+
+				// 1. Verify workflow exists
+				mock.ExpectQuery("SELECT name FROM workflows").
+					WithArgs(testWfID).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"name"}).
+							AddRow("Weather Check System"),
+					)
+
+				// 2. Hydrate nodes
+				mock.ExpectQuery("SELECT").
+					WithArgs(testWfID).
+					WillReturnRows(
+						pgxmock.NewRows([]string{
+							"instance_id", "node_type", "x_pos", "y_pos",
+							"label", "base_description", "metadata",
+						}).AddRow("start", "start", -160.0, 300.0, "Start", "Begin workflow", nodeMetadata),
+					)
+
+				// 3. Hydrate edges
+				mock.ExpectQuery("SELECT edge_id").
+					WithArgs(testWfID).
+					WillReturnRows(
+						pgxmock.NewRows([]string{
+							"edge_id", "source_instance_id", "target_instance_id", "source_handle",
+							"edge_type", "animated", "label", "style_props", "label_style",
+						}),
+					)
+
+				// 4. Get next version
+				mock.ExpectQuery("SELECT COALESCE").
+					WithArgs(testWfID).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"coalesce"}).AddRow(1),
+					)
+
+				// 5. Insert snapshot
+				mock.ExpectQuery("INSERT INTO workflow_snapshots").
+					WithArgs(testWfID, 1, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "published_at"}).
+							AddRow(snapID, testNow),
+					)
+
+				// 6. Update workflow status
+				mock.ExpectExec("UPDATE workflows").
+					WithArgs(snapID, testWfID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+				mock.ExpectCommit()
+			},
+			checkSnap: func(t *testing.T, snap *storage.WorkflowSnapshot) {
+				t.Helper()
+				if snap.ID != snapID {
+					t.Errorf("expected snapshot ID %v, got %v", snapID, snap.ID)
+				}
+				if snap.WorkflowID != testWfID {
+					t.Errorf("expected workflow ID %v, got %v", testWfID, snap.WorkflowID)
+				}
+				if snap.VersionNumber != 1 {
+					t.Errorf("expected version 1, got %d", snap.VersionNumber)
+				}
+				if len(snap.DagData.Nodes) != 1 {
+					t.Errorf("expected 1 node in snapshot, got %d", len(snap.DagData.Nodes))
+				}
+			},
+		},
+		{
+			name: "workflow not found returns error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBeginTx(pgx.TxOptions{
+					IsoLevel: pgx.RepeatableRead,
+				})
+				mock.ExpectQuery("SELECT name FROM workflows").
+					WithArgs(testWfID).
+					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectRollback()
+			},
+			wantErr: pgx.ErrNoRows.Error(),
+		},
+		{
+			name: "node hydration failure rolls back",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBeginTx(pgx.TxOptions{
+					IsoLevel: pgx.RepeatableRead,
+				})
+				mock.ExpectQuery("SELECT name FROM workflows").
+					WithArgs(testWfID).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"name"}).AddRow("Test"),
+					)
+				mock.ExpectQuery("SELECT").
+					WithArgs(testWfID).
+					WillReturnError(errors.New("connection reset"))
+				mock.ExpectRollback()
+			},
+			wantErr: "hydrate nodes for publish: connection reset",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			if err != nil {
+				t.Fatalf("failed to create mock pool: %v", err)
+			}
+			defer mock.Close()
+
+			tt.setupMock(mock)
+
+			store := &storage.PgStorage{DB: mock}
+			snap, err := store.PublishWorkflow(context.Background(), testWfID)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if err.Error() != tt.wantErr {
+					t.Errorf("expected error %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.checkSnap != nil {
+				tt.checkSnap(t, snap)
 			}
 
 			if err := mock.ExpectationsWereMet(); err != nil {
