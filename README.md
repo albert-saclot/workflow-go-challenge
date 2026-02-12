@@ -334,6 +334,9 @@ api/
 
   Both follow the same transactional pattern as `GetWorkflow` and would need only thin HTTP handlers to be exposed as `PUT /{id}` and `DELETE /{id}`.
 - **No client-level tests** — The `pkg/clients/` packages (weather, flood) make real HTTP calls with no `httptest.Server` mocks. Node tests cover the integration boundary but the clients themselves are untested in isolation.
+- **No idempotency for side-effecting nodes** — Retrying a failed workflow re-executes all nodes from scratch, including nodes that already produced external side effects (emails sent, SMS delivered). Safe retries require idempotency keys per node execution.
+- **No data-flow validation** — Node input/output contracts are implicit. A workflow can be structurally valid but fail at runtime because a downstream node expects a variable name that the upstream node doesn't produce. Declared input/output schemas per node type would catch these mismatches at save time.
+- **No metadata schema enforcement** — `node_library.metadata` is unvalidated JSONB. The DB accepts any shape, so a typo in a migration or API call (e.g., `api_endpint` instead of `api_endpoint`) is only caught at execution time. The node type set is finite (7 types with known shapes) — typed columns or a per-type config table would push validation to the DB layer. JSONB is the right trade-off for rapid iteration with a polymorphic schema, but the application layer doesn't validate metadata shape either, leaving a gap.
 
 ## What I'd Build Next
 
