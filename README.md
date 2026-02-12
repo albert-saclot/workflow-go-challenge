@@ -37,6 +37,50 @@ The persistence layer uses a three-tier structure managed via Flyway migrations:
 
 This separation means updating a library node (e.g. changing an API endpoint) propagates to all workflows that reference it, without touching instance-level layout data.
 
+#### ER Diagram
+
+```
+┌──────────────────────┐             ┌───────────────────┐
+│     node_library     │             │     workflows     │
+│──────────────────────│             │───────────────────│
+│ id          (PK,UUID)│◄─────┐      │ id     (PK, UUID) │
+│ node_type   VARCHAR  │      │      │ name     VARCHAR  │
+│ base_label  VARCHAR  │      │      │ deleted_at  TSTZ  │
+│ base_description TEXT│      │      └─────────┬─────────┘
+│ metadata      JSONB  │      │                │
+│ deleted_at     TSTZ  │      │                │ 1
+└──────────────────────┘      │                │
+                              │                ▼ *
+┌─────────────────────────────┴────────────────────────────┐
+│              workflow_node_instances                     │
+│──────────────────────────────────────────────────────────│
+│ workflow_id    (PK, FK → workflows.id) ON DELETE CASCADE │
+│ instance_id    (PK, VARCHAR)  'start', 'weather-api', …  │
+│ node_library_id (FK → node_library.id)                   │
+│ x_pos, y_pos    FLOAT                                    │
+└──────────┬──────────────────────────────┬────────────────┘
+           │                              │
+           │ source_instance_id           │ target_instance_id
+           │ (composite FK)               │ (composite FK)
+           ▼                              ▼
+┌────────────────────────────────────────────────────────────────┐
+│                    workflow_edges                              │
+│────────────────────────────────────────────────────────────────│
+│ workflow_id          (PK, FK → workflows.id) ON DELETE CASCADE │
+│ edge_id              (PK, VARCHAR)                             │
+│ source_instance_id   (FK → (workflow_id, instance_id))         │
+│ target_instance_id   (FK → (workflow_id, instance_id))         │
+│ source_handle         VARCHAR    (condition branch routing)    │
+│ edge_type, animated, label, style_props, label_style           │
+└────────────────────────────────────────────────────────────────┘
+```
+
+Key constraints:
+- **Composite PK** on `workflow_node_instances(workflow_id, instance_id)` — instance IDs are human-readable strings, unique per workflow
+- **Composite FKs** on `workflow_edges` — both `source_instance_id` and `target_instance_id` reference `(workflow_id, instance_id)`, preventing cross-workflow edges at the DB level
+- **Soft deletes** on `workflows` and `node_library` (`deleted_at` column); child rows use `ON DELETE CASCADE` for hard deletes
+- Audit columns (`created_at`, `modified_at`) on all tables with auto-update triggers (omitted from diagram for clarity)
+
 ### Node Type System
 
 Each node type implements a common `Node` interface with two responsibilities:
@@ -103,6 +147,110 @@ This catches malformed workflows upfront rather than wasting API calls on a grap
 ### External Client Abstraction
 
 External API calls (weather, email, SMS, flood) are behind interfaces in `pkg/clients/`. Node implementations depend on the interface, not the concrete client. The `Deps` struct carries all client instances through dependency injection, making nodes unit-testable without network calls.
+
+### API Endpoints
+
+| Method | Path | Handler | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/workflows/{id}` | `HandleGetWorkflow` | Load workflow definition for React Flow |
+| `POST` | `/workflows/{id}/execute` | `HandleExecuteWorkflow` | Execute workflow with input variables |
+| `PUT` | `/workflows/{id}` | `HandleSaveWorkflow` | Create or update workflow (storage-ready) |
+| `DELETE` | `/workflows/{id}` | `HandleDeleteWorkflow` | Soft-delete workflow (storage-ready) |
+
+`PUT` and `DELETE` are backed by fully implemented and tested storage methods (`UpsertWorkflow`, `DeleteWorkflow`) — only the thin HTTP handlers remain to be wired.
+
+#### Request Flow
+
+**`GET /workflows/{id}`** — Load a workflow definition for the frontend editor.
+
+```
+Client                    Handler                   Storage (REPEATABLE READ tx)
+  │                          │                              │
+  │  GET /workflows/{id}     │                              │
+  │─────────────────────────►│  parse UUID                  │
+  │                          │─────────────────────────────►│  SELECT workflow header
+  │                          │                              │  (WHERE deleted_at IS NULL)
+  │                          │                              │  SELECT instances JOIN node_library
+  │                          │                              │  SELECT edges
+  │                          │◄─────────────────────────────│  Workflow{Nodes, Edges}
+  │                          │                              │
+  │                          │  for each node:              │
+  │                          │    factory → typed Node      │
+  │                          │    node.ToJSON()             │
+  │                          │                              │
+  │  200 {id, nodes, edges}  │                              │
+  │◄─────────────────────────│                              │
+```
+
+Three queries in a single `REPEATABLE READ` read-only transaction ensure a consistent snapshot — no partial reads if a concurrent save is in progress.
+
+**`POST /workflows/{id}/execute`** — Run the workflow graph end-to-end.
+
+```
+Client                    Handler                   Engine
+  │                          │                         │
+  │  POST /execute           │                         │
+  │  {formData, condition}   │                         │
+  │─────────────────────────►│  parse UUID + body      │
+  │                          │  flatten inputs         │
+  │                          │  GetWorkflow(...)       │
+  │                          │────────────────────────►│  build typed nodes (factory)
+  │                          │                         │  build adjacency list
+  │                          │                         │  validateDAG (3-colour DFS)
+  │                          │                         │  ──── execution loop ────
+  │                          │                         │  for each node (BFS):
+  │                          │                         │    ctx with 10s timeout
+  │                          │                         │    node.Execute(ctx, vars)
+  │                          │                         │    merge outputs → vars
+  │                          │                         │    follow edges (branch routing)
+  │                          │                         │  ────────────────────────
+  │                          │◄────────────────────────│  ExecutionResult{status, steps}
+  │  200 {status, steps,     │                         │
+  │       executedAt}        │                         │
+  │◄─────────────────────────│                         │
+```
+
+Business failures (node errors, bad input) return 200 with `status: "failed"` and partial results. Only infrastructure errors (corrupt metadata, marshal failures) return 5xx.
+
+**`PUT /workflows/{id}`** — Save or update a workflow definition.
+
+```
+Client                    Handler                   Storage (READ COMMITTED tx)
+  │                          │                              │
+  │  PUT /workflows/{id}     │                              │
+  │  {name, nodes, edges}    │                              │
+  │─────────────────────────►│  parse UUID + body           │
+  │                          │─────────────────────────────►│  INSERT workflow … ON CONFLICT
+  │                          │                              │    DO UPDATE (clears deleted_at)
+  │                          │                              │  DELETE old node instances
+  │                          │                              │  SELECT node_library (type → ID map)
+  │                          │                              │  INSERT new node instances
+  │                          │                              │  DELETE old edges
+  │                          │                              │  INSERT new edges
+  │                          │                              │  COMMIT
+  │  200 OK                  │◄─────────────────────────────│
+  │◄─────────────────────────│                              │
+```
+
+Delete-and-reinsert for child rows keeps the write path simple. The `ON CONFLICT` upsert means saving a previously deleted workflow un-deletes it.
+
+**`DELETE /workflows/{id}`** — Soft-delete a workflow.
+
+```
+Client                    Handler                   Storage (READ COMMITTED tx)
+  │                          │                              │
+  │  DELETE /workflows/{id}  │                              │
+  │─────────────────────────►│  parse UUID                  │
+  │                          │─────────────────────────────►│  DELETE edges (hard)
+  │                          │                              │  DELETE node instances (hard)
+  │                          │                              │  UPDATE workflows SET deleted_at
+  │                          │                              │  (0 rows → 404)
+  │                          │                              │  COMMIT
+  │  204 No Content          │◄─────────────────────────────│
+  │◄─────────────────────────│                              │
+```
+
+Child rows are hard-deleted (they have no independent audit value); the workflow header is soft-deleted to preserve the audit trail. The header remains queryable for historical reference but is excluded from active queries by the `WHERE deleted_at IS NULL` filter.
 
 ### Project Structure
 
