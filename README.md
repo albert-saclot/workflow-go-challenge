@@ -39,46 +39,50 @@ This separation means updating a library node (e.g. changing an API endpoint) pr
 
 #### ER Diagram
 
+Current tables plus the proposed `workflow_triggers` table (see [Workflow Triggers](#workflow-triggers) below).
+
 ```
-┌──────────────────────┐             ┌───────────────────┐
-│     node_library     │             │     workflows     │
-│──────────────────────│             │───────────────────│
-│ id          (PK,UUID)│◄─────┐      │ id     (PK, UUID) │
-│ node_type   VARCHAR  │      │      │ name     VARCHAR  │
-│ base_label  VARCHAR  │      │      │ deleted_at  TSTZ  │
-│ base_description TEXT│      │      └─────────┬─────────┘
-│ metadata      JSONB  │      │                │
-│ deleted_at     TSTZ  │      │                │ 1
-└──────────────────────┘      │                │
-                              │                ▼ *
-┌─────────────────────────────┴────────────────────────────┐
-│              workflow_node_instances                     │
-│──────────────────────────────────────────────────────────│
-│ workflow_id    (PK, FK → workflows.id) ON DELETE CASCADE │
-│ instance_id    (PK, VARCHAR)  'start', 'weather-api', …  │
-│ node_library_id (FK → node_library.id)                   │
-│ x_pos, y_pos    FLOAT                                    │
-└──────────┬──────────────────────────────┬────────────────┘
-           │                              │
-           │ source_instance_id           │ target_instance_id
-           │ (composite FK)               │ (composite FK)
-           ▼                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│                    workflow_edges                              │
-│────────────────────────────────────────────────────────────────│
-│ workflow_id          (PK, FK → workflows.id) ON DELETE CASCADE │
-│ edge_id              (PK, VARCHAR)                             │
-│ source_instance_id   (FK → (workflow_id, instance_id))         │
-│ target_instance_id   (FK → (workflow_id, instance_id))         │
-│ source_handle         VARCHAR    (condition branch routing)    │
-│ edge_type, animated, label, style_props, label_style           │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────┐         ┌──────────────────────────┐
+│   node_library   │         │        workflows         │
+│──────────────────│         │──────────────────────────│
+│ id (PK)          │◄────┐   │ id (PK)                  │
+│ node_type        │     │   │ name                     │
+│ base_label       │     │   │ status                   │
+│ metadata (JSONB) │     │   │ active_snapshot_id (FK)──│──┐
+└──────────────────┘     │   └──────────┬───────────────┘  │
+                         │       │      │      │           │
+                         │       │      │      │           │
+           ┌─────────────┘       │      │      │           │
+           │                     │      │      │           │
+┌──────────┴───────────────┐     │      │      │     ┌─────┴────────────────┐
+│ workflow_node_instances  │     │      │      │     │ workflow_snapshots   │
+│──────────────────────────│     │      │      │     │──────────────────────│
+│ workflow_id (PK,FK)      │◄────┘      │      │     │ id (PK)              │
+│ instance_id (PK)         │◄──┐        │      │     │ workflow_id (FK)     │
+│ node_library_id (FK)     │   │        │      └────►│ version_number       │
+│ x_pos, y_pos             │   │        │            │ dag_data (JSONB)     │
+└──────────────────────────┘   │        │            └──────────────────────┘
+                               │        │
+┌──────────────────────────┐   │        │      ┌──────────────────────────┐
+│    workflow_edges        │   │        │      │  workflow_triggers       │
+│──────────────────────────│   │        │      │  (proposed)              │
+│ workflow_id (PK,FK)      │───┘        │      │──────────────────────────│
+│ edge_id (PK)             │            └─────►│ id (PK)                  │
+│ source_instance_id (FK)  │                   │ workflow_id (FK)         │
+│ target_instance_id (FK)  │                   │ trigger_type             │
+│ source_handle            │                   │ cron_expression          │
+│ label, style (JSONB)     │                   │ webhook_token (UNIQUE)   │
+└──────────────────────────┘                   │ default_inputs (JSONB)   │
+                                               │ enabled, next_trigger    │
+                                               └──────────────────────────┘
 ```
 
-Key constraints:
+Key relationships:
 - **Composite PK** on `workflow_node_instances(workflow_id, instance_id)` — instance IDs are human-readable strings, unique per workflow
 - **Composite FKs** on `workflow_edges` — both `source_instance_id` and `target_instance_id` reference `(workflow_id, instance_id)`, preventing cross-workflow edges at the DB level
 - **Soft deletes** on `workflows` and `node_library` (`deleted_at` column); child rows use `ON DELETE CASCADE` for hard deletes
+- `workflow_snapshots` freezes the full graph as JSONB; `workflows.active_snapshot_id` points to the current published version
+- `workflow_triggers` (proposed) associates one or more triggers with a workflow — schedule config, webhook tokens, and operational state
 - Audit columns (`created_at`, `modified_at`) on all tables with auto-update triggers (omitted from diagram for clarity)
 
 ### Node Type System
@@ -351,7 +355,54 @@ Ordered by impact, not by ease of implementation:
 
 Design ideas for scaling beyond the current synchronous single-process model. These are architectural directions, not planned implementations.
 
-**Sentinel Node Subtypes** — Specialized start nodes (schedule trigger, webhook/event trigger) and end nodes (report, catalyst that triggers another workflow, janitor for cleanup). Start sentinels are declarative metadata for an external orchestration layer — the node's `Execute()` is a no-op, but its metadata tells a scheduler or event router when to invoke the workflow. End sentinels can do real work inside `Execute()`: generate a report, enqueue a downstream workflow, or run cleanup logic.
+#### Workflow Triggers
+
+Triggers are a separate concern from nodes, not start-node subtypes. The graph describes _what_ to do; triggers describe _when_ and _how_ to start. A workflow executes identically regardless of whether a human clicked "Run", a cron schedule fired, or a webhook arrived. `executeWorkflow` already accepts `(ctx, wf, inputs, deps)` — adding a new trigger type means adding a new _caller_, not changing the engine. The node graph stays clean; the start node remains a simple sentinel.
+
+**`workflow_triggers` table** — Each row associates a trigger with a workflow. `trigger_type` is `schedule` or `webhook`. Schedule triggers store `cron_expression`, `timezone`, and a precomputed `next_trigger` timestamp. Webhook triggers store an opaque `webhook_token` (UNIQUE, URL-safe, revocable) and `secret_hash` for HMAC validation. Both types carry `default_inputs` (JSONB) for headless execution — scheduled workflows have no form submission, so the trigger supplies the inputs. Operational columns: `enabled`, `last_triggered_at`, `next_trigger_at`.
+
+**Scheduled workflows** — A polling goroutine runs on a 30-second interval, querying for due triggers:
+
+```sql
+SELECT id, workflow_id, default_inputs
+FROM workflow_triggers
+WHERE trigger_type = 'schedule'
+  AND enabled = true
+  AND next_trigger_at <= NOW()
+ORDER BY next_trigger_at
+FOR UPDATE SKIP LOCKED
+LIMIT 10;
+```
+
+`FOR UPDATE SKIP LOCKED` prevents double-firing when multiple instances poll concurrently — a row locked by one poller is invisible to others. After execution, the trigger's `next_trigger_at` is recomputed from the cron expression. Polling over an in-process cron library (like `robfig/cron`) because it's stateless — process restart doesn't lose schedule state, and the DB is the single source of truth.
+
+**Webhook-triggered workflows** — New endpoint `POST /webhooks/{token}`. Token-based routing avoids exposing workflow IDs in external-facing URLs. The token is opaque, URL-safe, and revocable (delete the trigger row or set `enabled = false`). Inbound requests are validated via HMAC-SHA256: the caller signs the body with a shared secret, the server verifies against `secret_hash`. The webhook payload maps directly to workflow inputs. Sync execution initially — the response carries the full execution result, same as manual runs.
+
+**Input flow by trigger type:**
+
+| Trigger | Input source | Form validation |
+| :--- | :--- | :--- |
+| Manual (POST /execute) | Request body | Form node validates as normal |
+| Schedule | `default_inputs` JSONB from trigger row | Form node validates identically |
+| Webhook | Payload JSON from HTTP body | Form node validates identically |
+
+The form node doesn't know or care where inputs came from. It validates the same `map[string]any` regardless of source.
+
+**Gaps acknowledged:**
+- No job persistence — a crash during a scheduled run loses the in-flight execution with no record it started
+- No webhook payload mapping/transform — the payload must exactly match expected input field names
+- No idempotency dedup for webhook retries — replayed webhooks execute the workflow again
+- No rate limiting on the webhook endpoint
+
+#### Sentinel Node Subtypes (End Nodes)
+
+End-node subtypes handle what happens _after_ execution completes. Unlike start-node triggers (which are a separate concern, above), end sentinels do real work inside `Execute()`:
+
+- **Report** — Generates a summary artifact from the execution context (e.g., PDF, Slack message)
+- **Catalyst** — Enqueues a downstream workflow, enabling workflow-of-workflows composition
+- **Janitor** — Runs cleanup logic (temp file removal, cache invalidation, external state teardown)
+
+The current `end` node is a no-op sentinel. These subtypes extend it with meaningful terminal behaviour while keeping the graph structure unchanged.
 
 **Async Execution with Workers** — Move from synchronous request-scoped execution to: HTTP request enqueues job → returns job ID → worker consumes and executes → persists results. This decouples the API latency from workflow duration and is a prerequisite for everything below. The current `executeWorkflow` function becomes the worker's inner loop, unchanged.
 
