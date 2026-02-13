@@ -40,6 +40,33 @@ func NewWeatherNode(base BaseFields, weatherClient weather.Client) (*WeatherNode
 	return n, nil
 }
 
+func (n *WeatherNode) Validate() error {
+	if n.weather == nil {
+		return fmt.Errorf("weather node %q: weather client is nil", n.ID)
+	}
+	if n.APIEndpoint == "" {
+		return fmt.Errorf("weather node %q: missing apiEndpoint", n.ID)
+	}
+	if len(n.Options) == 0 {
+		return fmt.Errorf("weather node %q: no city options configured", n.ID)
+	}
+	for i, opt := range n.Options {
+		if strings.TrimSpace(opt.City) == "" {
+			return fmt.Errorf("weather node %q: option [%d] has blank city", n.ID, i)
+		}
+		if opt.Lat < -90 || opt.Lat > 90 {
+			return fmt.Errorf("weather node %q: option %q lat %.2f out of range [-90, 90]", n.ID, opt.City, opt.Lat)
+		}
+		if opt.Lon < -180 || opt.Lon > 180 {
+			return fmt.Errorf("weather node %q: option %q lon %.2f out of range [-180, 180]", n.ID, opt.City, opt.Lon)
+		}
+	}
+	if len(n.InputVariables) == 0 {
+		return fmt.Errorf("weather node %q: no input variables", n.ID)
+	}
+	return nil
+}
+
 // Execute resolves the city from context, looks up coordinates,
 // and calls the weather client to fetch the current temperature.
 func (n *WeatherNode) Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error) {

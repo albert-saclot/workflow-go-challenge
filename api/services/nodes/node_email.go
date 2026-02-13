@@ -34,6 +34,55 @@ func NewEmailNode(base BaseFields, emailClient email.Client) (*EmailNode, error)
 	return n, nil
 }
 
+func (n *EmailNode) Validate() error {
+	if n.email == nil {
+		return fmt.Errorf("email node %q: email client is nil", n.ID)
+	}
+	if n.EmailTemplate.Subject == "" {
+		return fmt.Errorf("email node %q: missing email template subject", n.ID)
+	}
+	if n.EmailTemplate.Body == "" {
+		return fmt.Errorf("email node %q: missing email template body", n.ID)
+	}
+	if len(n.InputVariables) == 0 {
+		return fmt.Errorf("email node %q: no input variables", n.ID)
+	}
+	// Check that every {{placeholder}} in the template is declared in inputVariables.
+	inputSet := make(map[string]bool, len(n.InputVariables))
+	for _, v := range n.InputVariables {
+		inputSet[v] = true
+	}
+	for _, placeholder := range extractPlaceholders(n.EmailTemplate.Subject + " " + n.EmailTemplate.Body) {
+		if !inputSet[placeholder] {
+			return fmt.Errorf("email node %q: template references {{%s}} not in input variables", n.ID, placeholder)
+		}
+	}
+	return nil
+}
+
+// extractPlaceholders returns the unique variable names found inside {{...}} markers.
+func extractPlaceholders(tmpl string) []string {
+	var result []string
+	seen := make(map[string]bool)
+	for {
+		start := strings.Index(tmpl, "{{")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(tmpl[start:], "}}")
+		if end == -1 {
+			break
+		}
+		name := tmpl[start+2 : start+end]
+		if !seen[name] {
+			seen[name] = true
+			result = append(result, name)
+		}
+		tmpl = tmpl[start+end+2:]
+	}
+	return result
+}
+
 // Execute resolves template placeholders from context variables and
 // sends the email via the client. Returns the composed email as output.
 func (n *EmailNode) Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error) {

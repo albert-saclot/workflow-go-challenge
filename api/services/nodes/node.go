@@ -82,6 +82,10 @@ type Node interface {
 	ToJSON() NodeJSON
 	// Execute runs the node's logic using the shared runtime context.
 	Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error)
+	// Validate checks that the node's configuration is well-formed
+	// (e.g. required metadata fields are present). Called at build time,
+	// not during execution.
+	Validate() error
 }
 
 // Deps holds external clients that nodes may need during execution.

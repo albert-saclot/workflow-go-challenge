@@ -3,10 +3,55 @@ package nodes_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"workflow-code-test/api/services/nodes"
 )
+
+func TestConditionNode_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		meta    string
+		wantErr string
+	}{
+		{
+			name: "valid",
+			meta: `{"conditionVariable":"temperature","outputVariables":["conditionMet"]}`,
+		},
+		{
+			name: "empty conditionVariable defaults to temperature",
+			meta: `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := nodes.BaseFields{ID: "c1", NodeType: "condition", Metadata: json.RawMessage(tt.meta)}
+			node, err := nodes.NewConditionNode(base)
+			if err != nil {
+				t.Fatalf("failed to create condition node: %v", err)
+			}
+
+			err = node.Validate()
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
 
 func TestConditionNode_Execute(t *testing.T) {
 	t.Parallel()

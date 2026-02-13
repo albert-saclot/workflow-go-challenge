@@ -26,6 +26,26 @@ func NewSmsNode(base BaseFields, smsClient sms.Client) (*SmsNode, error) {
 	return n, nil
 }
 
+func (n *SmsNode) Validate() error {
+	if n.sms == nil {
+		return fmt.Errorf("sms node %q: sms client is nil", n.ID)
+	}
+	if len(n.InputVariables) == 0 {
+		return fmt.Errorf("sms node %q: no input variables", n.ID)
+	}
+	hasPhone := false
+	for _, v := range n.InputVariables {
+		if v == "phone" {
+			hasPhone = true
+			break
+		}
+	}
+	if !hasPhone {
+		return fmt.Errorf("sms node %q: input variables must include \"phone\"", n.ID)
+	}
+	return nil
+}
+
 func (n *SmsNode) Execute(ctx context.Context, nCtx *NodeContext) (*ExecutionResult, error) {
 	phone, ok := nCtx.Variables["phone"].(string)
 	if !ok || phone == "" {

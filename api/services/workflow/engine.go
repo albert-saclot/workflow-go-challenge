@@ -78,6 +78,9 @@ func executeWorkflow(ctx context.Context, wf *storage.Workflow, inputs map[strin
 		if err != nil {
 			return nil, fmt.Errorf("failed to construct node %q: %w", sn.ID, err)
 		}
+		if err := n.Validate(); err != nil {
+			return nil, fmt.Errorf("node %q failed validation: %w", sn.ID, err)
+		}
 		nodeMap[sn.ID] = n
 		nodeInfo[sn.ID] = sn
 	}

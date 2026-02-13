@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // FormNode collects user input. The metadata defines which fields to
@@ -23,6 +24,36 @@ func NewFormNode(base BaseFields) (*FormNode, error) {
 		return nil, fmt.Errorf("invalid form metadata: %w", err)
 	}
 	return n, nil
+}
+
+func (n *FormNode) Validate() error {
+	if len(n.InputFields) == 0 {
+		return fmt.Errorf("form node %q: no input fields", n.ID)
+	}
+	for i, f := range n.InputFields {
+		if strings.TrimSpace(f) == "" {
+			return fmt.Errorf("form node %q: input field [%d] is blank", n.ID, i)
+		}
+	}
+	if len(n.OutputVariables) == 0 {
+		return fmt.Errorf("form node %q: no output variables", n.ID)
+	}
+	for i, v := range n.OutputVariables {
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("form node %q: output variable [%d] is blank", n.ID, i)
+		}
+	}
+	// Every input field must appear in output variables so the values flow downstream.
+	outSet := make(map[string]bool, len(n.OutputVariables))
+	for _, v := range n.OutputVariables {
+		outSet[v] = true
+	}
+	for _, f := range n.InputFields {
+		if !outSet[f] {
+			return fmt.Errorf("form node %q: input field %q not listed in output variables", n.ID, f)
+		}
+	}
+	return nil
 }
 
 // Execute extracts the declared input fields from the runtime context

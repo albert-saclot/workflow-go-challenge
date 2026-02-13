@@ -4,12 +4,79 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"workflow-code-test/api/pkg/clients/sms"
 	"workflow-code-test/api/services/nodes"
-	// mockSmsClient is available from the nodes_test package due to nodes_common_mocks_test.go
 )
+
+func TestSmsNode_Validate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil client", func(t *testing.T) {
+		t.Parallel()
+		meta := `{"inputVariables":["phone"],"outputVariables":["smsSent"]}`
+		base := nodes.BaseFields{ID: "sm1", NodeType: "sms", Metadata: json.RawMessage(meta)}
+		node, err := nodes.NewSmsNode(base, nil)
+		if err != nil {
+			t.Fatalf("failed to create sms node: %v", err)
+		}
+		if err := node.Validate(); err == nil || !strings.Contains(err.Error(), "sms client is nil") {
+			t.Errorf("expected nil-client error, got %v", err)
+		}
+	})
+
+	tests := []struct {
+		name    string
+		meta    string
+		client  *mockSmsClient
+		wantErr string
+	}{
+		{
+			name:   "valid",
+			meta:   `{"inputVariables":["phone","message"],"outputVariables":["smsSent"]}`,
+			client: &mockSmsClient{},
+		},
+		{
+			name:    "no input variables",
+			meta:    `{"outputVariables":["smsSent"]}`,
+			client:  &mockSmsClient{},
+			wantErr: "no input variables",
+		},
+		{
+			name:    "missing phone in input variables",
+			meta:    `{"inputVariables":["message"],"outputVariables":["smsSent"]}`,
+			client:  &mockSmsClient{},
+			wantErr: `must include "phone"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := nodes.BaseFields{ID: "sm1", NodeType: "sms", Metadata: json.RawMessage(tt.meta)}
+			node, err := nodes.NewSmsNode(base, tt.client)
+			if err != nil {
+				t.Fatalf("failed to create sms node: %v", err)
+			}
+
+			err = node.Validate()
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
 
 func TestSmsNode_Execute(t *testing.T) {
 	t.Parallel()

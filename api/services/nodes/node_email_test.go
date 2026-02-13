@@ -4,11 +4,96 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"workflow-code-test/api/pkg/clients/email"
 	"workflow-code-test/api/services/nodes"
 )
+
+func TestEmailNode_Validate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil client", func(t *testing.T) {
+		t.Parallel()
+		meta := `{"inputVariables":["email","city"],"emailTemplate":{"subject":"hi","body":"hello"}}`
+		base := nodes.BaseFields{ID: "em1", NodeType: "email", Metadata: json.RawMessage(meta)}
+		node, err := nodes.NewEmailNode(base, nil)
+		if err != nil {
+			t.Fatalf("failed to create email node: %v", err)
+		}
+		if err := node.Validate(); err == nil || !strings.Contains(err.Error(), "email client is nil") {
+			t.Errorf("expected nil-client error, got %v", err)
+		}
+	})
+
+	tests := []struct {
+		name    string
+		meta    string
+		client  *mockEmailClient
+		wantErr string
+	}{
+		{
+			name:   "valid",
+			meta:   `{"inputVariables":["email","city"],"outputVariables":["emailSent"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hello from {{city}}"}}`,
+			client: &mockEmailClient{},
+		},
+		{
+			name:    "missing subject",
+			meta:    `{"inputVariables":["email"],"emailTemplate":{"subject":"","body":"hello"}}`,
+			client:  &mockEmailClient{},
+			wantErr: "missing email template subject",
+		},
+		{
+			name:    "missing body",
+			meta:    `{"inputVariables":["email"],"emailTemplate":{"subject":"hi","body":""}}`,
+			client:  &mockEmailClient{},
+			wantErr: "missing email template body",
+		},
+		{
+			name:    "no input variables",
+			meta:    `{"emailTemplate":{"subject":"hi","body":"hello"}}`,
+			client:  &mockEmailClient{},
+			wantErr: "no input variables",
+		},
+		{
+			name:    "template placeholder not in input variables",
+			meta:    `{"inputVariables":["email"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hello"}}`,
+			client:  &mockEmailClient{},
+			wantErr: "template references {{city}} not in input variables",
+		},
+		{
+			name:   "template with all placeholders declared",
+			meta:   `{"inputVariables":["email","city","name"],"emailTemplate":{"subject":"Weather in {{city}}","body":"Hi {{name}}"}}`,
+			client: &mockEmailClient{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := nodes.BaseFields{ID: "em1", NodeType: "email", Metadata: json.RawMessage(tt.meta)}
+			node, err := nodes.NewEmailNode(base, tt.client)
+			if err != nil {
+				t.Fatalf("failed to create email node: %v", err)
+			}
+
+			err = node.Validate()
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
 
 func TestEmailNode_Execute(t *testing.T) {
 	t.Parallel()

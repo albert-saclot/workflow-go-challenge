@@ -35,6 +35,11 @@ func NewConditionNode(base BaseFields) (*ConditionNode, error) {
 	return n, nil
 }
 
+func (n *ConditionNode) Validate() error {
+	// conditionVariable may be empty — Execute() defaults to "temperature".
+	return nil
+}
+
 // Execute evaluates the condition using operator and threshold from context.
 // The variable to compare is read from conditionVariable in metadata,
 // defaulting to "temperature" for backward compatibility.
