@@ -21,7 +21,7 @@ The core problem is: build a workflow engine that's extensible (new node types w
 
 **Interface-Driven Extensibility** — Every external dependency (weather, email, SMS, flood) is behind an interface. This isn't just for testing — it's the primary extension mechanism. After building the initial weather workflow, I added SMS and flood nodes to prove the architecture actually extends. Each required exactly four touch points: client interface + implementation, node implementation, factory case, and a DB migration seed. Zero changes to existing code. The extensibility is demonstrated, not just claimed.
 
-**Fail Before You Waste** — Before executing any node, the engine validates the graph structure: duplicate node IDs, dangling edge references, and start node protection. These catch real authoring errors that would cause confusing runtime failures. Cycles are intentionally allowed — they enable while-loop patterns where a condition node controls re-entry. The `maxExecutionSteps` limit (100) serves as the loop termination guard, bounding execution whether the loop exits cleanly via a condition or runs to exhaustion.
+**Fail Before You Waste** — Before executing any node, the engine runs two layers of validation. First, each node's `Validate()` method checks its own metadata invariants — required fields, coordinate ranges, template placeholder consistency. Then `validateGraph` checks structural integrity: duplicate node IDs, dangling edge references, and start node protection. Together these catch both configuration errors (typos in JSONB metadata) and authoring errors (malformed graph topology) before any node runs. Cycles are intentionally allowed — they enable while-loop patterns where a condition node controls re-entry. The `maxExecutionSteps` limit (100) serves as the loop termination guard, bounding execution whether the loop exits cleanly via a condition or runs to exhaustion.
 
 **Business Errors Are Not Server Errors** — Node failures return HTTP 200 with `status: "failed"` and partial results, not 500. A weather API returning bad data is a business outcome — the engine ran correctly, a node within the workflow produced an error. This lets clients inspect completed steps for debugging and avoids conflating "the server crashed" with "the user submitted an invalid city name." That said, 422 would also be defensible for input validation failures.
 
@@ -87,9 +87,10 @@ Key relationships:
 
 ### Node Type System
 
-Each node type implements a common `Node` interface with two responsibilities:
+Each node type implements a common `Node` interface with three responsibilities:
 
 - **`ToJSON()`** — Serializes back to the React Flow shape the frontend expects. Passes raw JSONB metadata through without transformation, so the frontend always gets exactly what the database stores.
+- **`Validate()`** — Checks that the node's metadata is well-formed before execution begins. Called at build time (during node construction in the engine), not during execution. Each node type enforces its own invariants — required fields, coordinate ranges, template/variable consistency. See [Metadata Validation](#metadata-validation) below.
 - **`Execute(ctx, nodeContext)`** — Runs the node's logic during workflow execution. Returns output variables that flow into downstream nodes, and an optional branch identifier for condition routing.
 
 Current node types:
@@ -116,10 +117,11 @@ The `sms` and `flood` node types were added specifically to validate that the ar
 The `executeWorkflow` function walks the workflow graph from the start node:
 
 1. Constructs typed node instances from stored metadata via the factory
-2. Builds an adjacency list from edges
-3. **Validates graph structure** before executing any nodes (see below)
-4. Executes nodes sequentially, merging each node's output variables into a shared context
-5. Follows outgoing edges — for condition nodes, matches the branch result (`"true"`/`"false"`) against edge `sourceHandle` values
+2. **Validates each node's metadata** — calls `node.Validate()` immediately after construction, rejecting workflows with misconfigured nodes before any execution occurs
+3. Builds an adjacency list from edges
+4. **Validates graph structure** before executing any nodes (see below)
+5. Executes nodes sequentially, merging each node's output variables into a shared context
+6. Follows outgoing edges — for condition nodes, matches the branch result (`"true"`/`"false"`) against edge `sourceHandle` values
 
 #### Pre-execution Graph Validation
 
@@ -143,8 +145,50 @@ start ──▶ A ──▶ start                        ✗ rejected (start has
 
 This catches malformed workflows upfront while still supporting intentional looping patterns.
 
+#### Metadata Validation
+
+After constructing each node from its stored JSONB metadata, the engine calls `node.Validate()` before any execution begins. This closes the gap where `node_library.metadata` is unvalidated JSONB — the DB accepts any shape, but the application layer now rejects misconfigured nodes at build time rather than letting them fail mid-execution.
+
+Each node type enforces its own invariants:
+
+| Node Type | Validations |
+| :--- | :--- |
+| `start` / `end` | Node type must be exactly `"start"` or `"end"` |
+| `form` | At least one input field; no blank fields; every input field must appear in output variables |
+| `condition` | No-op (condition variable defaults to `"temperature"` if empty) |
+| `weather` | Client not nil; API endpoint present; at least one city option with valid lat/lon ranges; input variables present |
+| `email` | Client not nil; template subject and body present; input variables present; every `{{placeholder}}` in template maps to a declared input variable |
+| `sms` | Client not nil; input variables present; `"phone"` must be in input variables |
+| `flood` | Client not nil; API endpoint present; at least one city option with valid lat/lon ranges; input variables present |
+
+```
+                    ┌──────────────────┐
+                    │  JSONB metadata  │     Unvalidated — DB accepts any shape
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │  Factory (New)   │     Parses JSONB into typed struct
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │   Validate()     │     Rejects missing fields, bad ranges,
+                    │                  │     template/variable mismatches
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │ validateGraph()  │     Structural checks (dupes, dangling edges)
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │   Execute()      │     Node runs with validated config
+                    └──────────────────┘
+```
+
+The email node validation is the most thorough — it extracts `{{placeholder}}` markers from the template and cross-references them against declared input variables, catching typos like `{{temperture}}` at build time instead of producing silent empty substitutions at runtime.
+
 #### Safeguards
 
+- **Metadata validation** — Each node's `Validate()` method checks configuration invariants (required fields, coordinate ranges, template/variable consistency) at build time, before any execution occurs
 - **Graph validation** — Structural checks (duplicate IDs, dangling edges, start node protection) reject malformed workflows before execution begins
 - **Total workflow timeout** — 60-second cap on the entire execution, enforced via `context.WithTimeout`
 - **Per-node timeout** — Each node runs under its own 10-second timeout to prevent slow API calls from blocking the workflow
@@ -205,8 +249,9 @@ Client                    Handler                   Engine
   │                          │  flatten inputs         │
   │                          │  GetWorkflow(...)       │
   │                          │────────────────────────►│  build typed nodes (factory)
+  │                          │                         │  node.Validate() per node
   │                          │                         │  build adjacency list
-  │                          │                         │  validateDAG (3-colour DFS)
+  │                          │                         │  validateGraph (structure)
   │                          │                         │  ──── execution loop ────
   │                          │                         │  for each node (BFS):
   │                          │                         │    ctx with 10s timeout
@@ -336,7 +381,7 @@ api/
 - **No client-level tests** — The `pkg/clients/` packages (weather, flood) make real HTTP calls with no `httptest.Server` mocks. Node tests cover the integration boundary but the clients themselves are untested in isolation.
 - **No idempotency for side-effecting nodes** — Retrying a failed workflow re-executes all nodes from scratch, including nodes that already produced external side effects (emails sent, SMS delivered). Safe retries require idempotency keys per node execution.
 - **No data-flow validation** — Node input/output contracts are implicit. A workflow can be structurally valid but fail at runtime because a downstream node expects a variable name that the upstream node doesn't produce. Declared input/output schemas per node type would catch these mismatches at save time.
-- **No metadata schema enforcement** — `node_library.metadata` is unvalidated JSONB. The DB accepts any shape, so a typo in a migration or API call (e.g., `api_endpint` instead of `api_endpoint`) is only caught at execution time. The node type set is finite (7 types with known shapes) — typed columns or a per-type config table would push validation to the DB layer. JSONB is the right trade-off for rapid iteration with a polymorphic schema, but the application layer doesn't validate metadata shape either, leaving a gap.
+- **No DB-level metadata schema enforcement** — `node_library.metadata` is JSONB with no DB-level schema constraint. The application layer now validates metadata via `node.Validate()` at build time (before execution), catching missing fields, bad coordinate ranges, and template/variable mismatches. However, validation only runs when a workflow is executed — saving a node with malformed metadata to the library still succeeds silently. DB-level validation (CHECK constraints, per-type config tables) would push enforcement even earlier.
 
 ## What I'd Build Next
 
@@ -346,7 +391,7 @@ Ordered by impact, not by ease of implementation:
 
 2. **Observability** — OpenTelemetry spans per node execution, Prometheus metrics, and structured log correlation. See [Observability](#observability) under Production Architecture for the full design — instrumentation points, span hierarchy, metric definitions, and the correlation gap between handler-layer request IDs and engine-layer logs.
 
-3. **Save-time graph validation** — Currently structural checks run at execution time. Validating at save time (the `UpsertWorkflow` path) would prevent users from saving broken workflows. The `validateGraph` function already exists and is decoupled from execution — it just needs to be called from the save handler.
+3. **Save-time validation** — Both metadata validation (`node.Validate()`) and structural checks (`validateGraph`) currently run at execution time. Calling them from the `UpsertWorkflow` save path would prevent users from saving broken workflows. Both are already decoupled from execution — they just need to be invoked from the save handler.
 
 4. **Client-level tests** — The `pkg/clients/` HTTP clients have zero test coverage. `httptest.Server` mocks would catch timeout handling, error parsing, and malformed response edge cases that the node-level mocks don't exercise.
 
@@ -539,7 +584,7 @@ Tests cover three packages across 11 test files:
 
 | Package | Files | What's tested |
 | :--- | :--- | :--- |
-| `services/nodes` | `node_test.go` + 7 per-type test files | Factory, ToJSON (all 8 node types), Execute paths for every node type |
+| `services/nodes` | `node_test.go` + 7 per-type test files | Factory, ToJSON (all 8 node types), Validate and Execute paths for every node type |
 | `services/storage` | `storage_test.go` | GetWorkflow, UpsertWorkflow, DeleteWorkflow queries with pgxmock |
 | `services/workflow` | `engine_test.go` | Graph validation, while-loop execution, branching, cancellation, partial failure |
 | `services/workflow` | `workflow_test.go` | HTTP handlers (GET, POST, 404, 400, 500) |
